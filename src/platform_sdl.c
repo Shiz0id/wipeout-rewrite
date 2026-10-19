@@ -77,7 +77,8 @@ void platform_pump_events(void) {
 		if (
 			ev.type == SDL_KEYDOWN && 
 			ev.key.keysym.scancode == SDL_SCANCODE_RETURN &&
-			(ev.key.keysym.mod & (KMOD_LALT | KMOD_RALT))
+			(ev.key.keysym.mod & (KMOD_LALT | KMOD_RALT)) &&
+			!ev.key.repeat
 		) {
 			platform_set_fullscreen(!platform_get_fullscreen());
 		}
@@ -90,7 +91,7 @@ void platform_pump_events(void) {
 				int code_internal = code - SDL_SCANCODE_LCTRL + INPUT_KEY_LCTRL;
 				input_set_button_state(code_internal, state);
 			}
-			else if (code > 0 && code < INPUT_KEY_MAX) {
+			else if (code > 0 && code <= INPUT_KEY_KP_PERIOD) {
 				input_set_button_state(code, state);
 			}
 		}
@@ -107,6 +108,11 @@ void platform_pump_events(void) {
 			if (gamepad && ev.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gamepad))) {
 				SDL_GameControllerClose(gamepad);
 				gamepad = platform_find_gamepad();
+
+				// No release events are sent for a removed device
+				for (int b = INPUT_GAMEPAD_A; b <= INPUT_GAMEPAD_R_STICK_RIGHT; b++) {
+					input_set_button_state(b, 0.0);
+				}
 			}
 		}
 
@@ -166,7 +172,7 @@ void platform_pump_events(void) {
 		}
 
 		// Mouse wheel
-		else if (ev.type == SDL_MOUSEWHEEL) {
+		else if (ev.type == SDL_MOUSEWHEEL && ev.wheel.y != 0) {
 			button_t button = ev.wheel.y > 0 
 				? INPUT_MOUSE_WHEEL_UP
 				: INPUT_MOUSE_WHEEL_DOWN;

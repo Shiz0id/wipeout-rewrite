@@ -72,12 +72,12 @@ vec3_t ship_ai_strat_avoid(ship_t *self, track_face_t *face) {
 
 vec3_t ship_ai_strat_avoid_other(ship_t *self, track_face_t *face) {
 	int min_section_num = 100;
-	ship_t *avoid_ship;
+	ship_t *avoid_ship = NULL;
 
 	for (int i = 0; i < NUM_PILOTS; i++) {
 		if (i != self->pilot) {
 			int section_diff = g.ships[i].total_section_num - self->total_section_num;
-			if (min_section_num < section_diff) {
+			if (section_diff < min_section_num && section_diff > -2) {
 				min_section_num = section_diff;
 				avoid_ship = &g.ships[i];
 			}
@@ -474,7 +474,7 @@ void ship_ai_update_race(ship_t *self) {
 			self->speed += self->remote_thrust_mag ;
 		}
 
-		self->speed -= fabsf(self->speed * self->angular_velocity.y) * (4 * M_PI * 2) * system_tick();
+		self->speed -= fabsf(self->speed * self->angular_velocity.y) * 4 / (M_PI * 2) * system_tick();
 		vec3_t track_target = vec3_sub(next->center, section->center);
 
 		track_target = vec3_mulf(vec3_normalize(track_target), self->speed);

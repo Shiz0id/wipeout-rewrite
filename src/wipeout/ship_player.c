@@ -545,7 +545,7 @@ ship_t *ship_player_find_target(ship_t *self) {
 			// Other ship is not on branch
 			else {
 				section_t *section = self->section;
-				for (int distance = 0; distance < 10; distance++) {
+				for (int distance = 1; distance < 10; distance++) {
 					section = section->next;
 					if (other->section == section && distance < shortest_distance && distance > 0) {
 						shortest_distance = distance;
@@ -561,7 +561,7 @@ ship_t *ship_player_find_target(ship_t *self) {
 			// Other ship is on a branch - check if we can reach the other ship's section
 			if (flags_is(other->section->flags, SECTION_JUNCTION)) {
 				section_t *section = self->section;
-				for (int distance = 0; distance < 10; distance++) {
+				for (int distance = 1; distance < 10; distance++) {
 					if (section->junction) {
 						section = section->junction;
 					}
@@ -579,6 +579,9 @@ ship_t *ship_player_find_target(ship_t *self) {
 			// Other ship is not on a branch
 			else {
 				int distance = other->section->num - self->section->num;
+				if (distance < 0) {
+					distance += g.track.total_section_nums;
+				}
 
 				if (distance < shortest_distance && distance > 0) {
 					shortest_distance = distance;

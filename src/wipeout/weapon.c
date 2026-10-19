@@ -90,7 +90,7 @@ void weapons_load(void) {
 
 		switch (prm->type) {
 			case PRM_TYPE_TRI:
-				swap(prm->u.tri.v[0].coord, prm->u.tri.v[0].coord);
+				swap(prm->u.tri.v[0].coord, prm->u.tri.v[2].coord);
 				break;
 			case PRM_TYPE_QUAD:
 				swap(prm->u.quad.v[0].coord, prm->u.quad.v[3].coord);
@@ -236,7 +236,7 @@ void weapon_set_trajectory(weapon_t *self) {
 	vec3_t target = vec3_transform(vec3(0,0,64), &ship->mat);
 	
 	float target_height = vec3_distance_to_plane(target, face_point, face->normal);
-	float ship_height = vec3_distance_to_plane(target, face_point, face->normal);
+	float ship_height = vec3_distance_to_plane(ship->position, face_point, face->normal);
 
 	float nudge = target_height * 0.95 - ship_height;
 
@@ -345,7 +345,7 @@ void weapon_update_mine_wait_for_release(weapon_t *self) {
 }
 
 void weapon_update_mine_lights(weapon_t *self, int index) {
-	uint8_t r = sinf(system_cycle_time() * M_PI * 2 + index * 0.66) * 128 + 128;
+	uint8_t r = sinf(system_cycle_time() * M_PI * 2 + index * 0.66) * 127 + 128;
 	for (int i = 0; i < 8; i++) {
 		primitive_t *prm = &self->model->primitives[i];
 
@@ -541,7 +541,17 @@ void weapon_fire_shield(ship_t *ship) {
 void weapon_update_shield(weapon_t *self) {
 	if (self->timer <= 0) {
 		self->active = false;
-		flags_rm(self->owner->flags, SHIP_SHIELDED);
+
+		// Only drop the shield flag if no other shield of this owner is still up
+		bool other_shield_active = false;
+		for (int i = 0; i < weapons_active; i++) {
+			if (&weapons[i] != self && weapons[i].active && weapons[i].owner == self->owner && weapons[i].update_func == weapon_update_shield) {
+				other_shield_active = true;
+			}
+		}
+		if (!other_shield_active) {
+			flags_rm(self->owner->flags, SHIP_SHIELDED);
+		}
 		return;
 	}
 

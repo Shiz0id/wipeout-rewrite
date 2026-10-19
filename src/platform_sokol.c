@@ -191,7 +191,8 @@ void platform_handle_event(const sapp_event* ev) {
 	if (
 		ev->type == SAPP_EVENTTYPE_KEY_DOWN && 
 		ev->key_code == SAPP_KEYCODE_ENTER &&
-		(ev->modifiers & SAPP_MODIFIER_ALT)
+		(ev->modifiers & SAPP_MODIFIER_ALT) &&
+		!ev->key_repeat
 	) {
 		platform_set_fullscreen(!sapp_is_fullscreen());
 	}
@@ -232,7 +233,7 @@ void platform_handle_event(const sapp_event* ev) {
 	}
 
 	// Mouse wheel
-	else if (ev->type == SAPP_EVENTTYPE_MOUSE_SCROLL) {
+	else if (ev->type == SAPP_EVENTTYPE_MOUSE_SCROLL && ev->scroll_y != 0) {
 		button_t button = ev->scroll_y > 0 
 			? INPUT_MOUSE_WHEEL_UP
 			: INPUT_MOUSE_WHEEL_DOWN;
@@ -256,7 +257,7 @@ void platform_audio_callback(float* buffer, int num_frames, int num_channels) {
 		audio_callback(buffer, num_frames * num_channels);
 	}
 	else {
-		memset(buffer, 0, num_frames * sizeof(float));
+		memset(buffer, 0, num_frames * num_channels * sizeof(float));
 	}
 }
 
