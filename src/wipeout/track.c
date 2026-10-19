@@ -26,8 +26,8 @@ void track_load(const char *base_path) {
 	for (int i = 0; i < len; i++) {
 		for (int tx = 0; tx < tiles; tx++) {
 			for (int ty = 0; ty < tiles; ty++) {
-				uint32_t sub_tile_index = ttf->tiles[i].near[ty * tiles + tx];
-				image_t *sub_tile = image_load_from_bytes(cmp->entries[wipeout64_mode ? i : sub_tile_index], false);
+				uint32_t sub_tile_index = wipeout64_mode ? i : ttf->tiles[i].near[ty * tiles + tx];
+				image_t *sub_tile = image_load_from_bytes(cmp->entries[sub_tile_index], false);
 				image_copy(sub_tile, temp_tile, 0, 0, sub_tile_size, sub_tile_size, tx * sub_tile_size, ty * sub_tile_size);
 				mem_temp_free(sub_tile);
 			}
@@ -208,8 +208,9 @@ void track_load_faces(char *file_name, vec3_t *vertices) {
 }
 
 void track_load_texture_file(char *tex_path) {
-	int size;
+	uint32_t size;
 	uint8_t *bytes = platform_load_asset(tex_path, &size);
+	error_if(size < g.track.face_count * 2, "%s too small for %d faces", tex_path, g.track.face_count);
 	uint32_t p = 0;
 	for (int i = 0; i < g.track.face_count; i++) {
 		g.track.faces[i].texture = get_u8(bytes, &p);
@@ -313,7 +314,7 @@ void track_draw(camera_t *camera) {
 		float cam_dot = vec3_dot(diff, cam_dir);
 		if (
 			cam_dot > -s->radius &&
-			cam_dot < (RENDER_FADEOUT_FAR * RENDER_FADEOUT_FAR) + s->radius
+			cam_dot < RENDER_FADEOUT_FAR + s->radius
 		) {
 			track_draw_section(s);
 		}

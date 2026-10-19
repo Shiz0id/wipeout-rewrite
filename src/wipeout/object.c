@@ -182,7 +182,8 @@ Object *objects_load(char *name, texture_list_t tl) {
 				prm->u.spr.texture = texture_from_list(tl, get_i16(bytes, &p));
 				prm->u.spr.color = rgba_from_u32(get_u32(bytes, &p));
 
-				object->vertices[prm->u.spr.coord].y += ((psx_prm_type == PSX_PRM_TYPE_TSPR ? prm->u.spr.height : -prm->u.spr.height) >> 1);
+				// Applied at draw time; vertices may be shared with other primitives
+				prm->u.spr.y_offset = (psx_prm_type == PSX_PRM_TYPE_TSPR ? prm->u.spr.height : -prm->u.spr.height) >> 1;
 				break;
 			case PSX_PRM_TYPE_SPLINE:
 				p += 52;
@@ -204,7 +205,7 @@ Object *objects_load(char *name, texture_list_t tl) {
 				*/
 				break;
 			default:
-				die("Unknown primitive type %x", prm->type);
+				die("Unknown primitive type %x", psx_prm_type);
 			} // switch
 		} // each prim
 	} // each object
@@ -224,7 +225,7 @@ void object_draw(Object *object, mat4_t *mat) {
 		switch (prm->type) {
 		case PRM_TYPE_SPR:
 			render_push_sprite(
-				vertex[prm->u.spr.coord],
+				vec3_add(vertex[prm->u.spr.coord], vec3(0, prm->u.spr.y_offset, 0)),
 				vec2i(prm->u.spr.width, prm->u.spr.height),
 				prm->u.spr.color,
 				prm->u.spr.texture

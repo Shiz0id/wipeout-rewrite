@@ -205,7 +205,9 @@ void race_end(void) {
 		}
 	}
 
-	if (g.race_type == RACE_TYPE_CHAMPIONSHIP) {
+	// Points are only awarded once the player qualifies; a failed attempt is
+	// re-raced and must not count
+	if (g.race_type == RACE_TYPE_CHAMPIONSHIP && g.race_position <= QUALIFYING_RANK) {
 		for (int i = 0; i < len(def.race_points_for_rank); i++) {
 			g.race_ranks[i].points = def.race_points_for_rank[i];
 

@@ -44,6 +44,7 @@ typedef struct Primitive {
 			int16_t coord;
 			int16_t width;
 			int16_t height;
+			int16_t y_offset;
 			rgba_t color;
 		} spr;
 

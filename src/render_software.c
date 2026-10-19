@@ -214,7 +214,7 @@ static int sort_sw_tris_by_depth(const void *a, const void *b) {
 
 	float za = (ta->verts[0].clip_pos.z + ta->verts[1].clip_pos.z + ta->verts[2].clip_pos.z) * 10000.0f;
 	float zb = (tb->verts[0].clip_pos.z + tb->verts[1].clip_pos.z + tb->verts[2].clip_pos.z) * 10000.0f;
-	return za - zb;
+	return (za > zb) - (za < zb);
 }
 
 static void render_flush(void) {

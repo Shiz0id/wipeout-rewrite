@@ -70,7 +70,7 @@ void ships_init(section_t *section) {
 			ranks_to_pilots[i] = g.championship_ranks[i].pilot;
 		}		
 		shuffle(ranks_to_pilots, 2); // shuffle 0..1
-		shuffle(ranks_to_pilots + 4, len(ranks_to_pilots)-5); // shuffle 4..len-1
+		shuffle(ranks_to_pilots + 4, len(ranks_to_pilots)-4); // shuffle 4..len-1
 	}
 
 	// player is always last

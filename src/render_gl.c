@@ -137,8 +137,8 @@ static const char * const SHADER_GAME_VS = SHADER_SOURCE(
 		gl_Position = projection * view * model * vec4(pos, 1.0);
 		gl_Position.xy += screen.xy * gl_Position.w;
 		v_color = color;
-		v_color.a *= smoothstep(
-			fade.y, fade.x, // fadeout far, near
+		v_color.a *= 1.0 - smoothstep(
+			fade.x, fade.y, // fadeout near, far (edges must be ascending)
 			length(vec4(camera_pos, 1.0) - model * vec4(pos, 1.0))
 		);
 		v_uv = uv / 2048.0; // ATLAS_GRID * ATLAS_SIZE
@@ -569,7 +569,7 @@ void render_set_resolution(render_resolution_t res) {
 }
 
 void render_set_post_effect(render_post_effect_t post) {
-	error_if(post < 0 || post > NUM_RENDER_POST_EFFECTS, "Invalid post effect %d", post);
+	error_if(post < 0 || post >= NUM_RENDER_POST_EFFECTS, "Invalid post effect %d", post);
 	prg_post = prg_post_effects[post];
 }
 
@@ -880,7 +880,7 @@ uint16_t render_texture_create(uint32_t tw, uint32_t th, rgba_t *pixels) {
 	uint32_t grid_x = 0;
 	uint32_t grid_y = ATLAS_SIZE - grid_height + 1;
 
-	for (uint32_t cx = 0; cx < ATLAS_SIZE - grid_width; cx++) {
+	for (uint32_t cx = 0; cx <= ATLAS_SIZE - grid_width; cx++) {
 		if (atlas_map[cx] >= grid_y) {
 			continue;
 		}

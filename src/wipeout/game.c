@@ -853,6 +853,14 @@ void game_init(void) {
 		mem_temp_free(save_file);
 	}
 
+	// Reset out of range settings from a corrupt or outdated save
+	if (save.screen_res < RENDER_RES_NATIVE || save.screen_res > RENDER_RES_480P) {
+		save.screen_res = RENDER_RES_NATIVE;
+	}
+	if (save.post_effect < 0 || save.post_effect >= NUM_RENDER_POST_EFFECTS) {
+		save.post_effect = RENDER_POST_NONE;
+	}
+
 	platform_set_fullscreen(save.fullscreen);
 	render_set_resolution(save.screen_res);
 	render_set_post_effect(save.post_effect);
@@ -919,11 +927,10 @@ void game_init(void) {
 
 	// User defined, loaded from the save struct
 	for (int action = 0; action < len(save.buttons); action++) {
-		if (save.buttons[action][0] != INPUT_INVALID) {
-			input_bind(INPUT_LAYER_USER, save.buttons[action][0], action);
-		}
-		if (save.buttons[action][1] != INPUT_INVALID) {
-			input_bind(INPUT_LAYER_USER, save.buttons[action][1], action);
+		for (int i = 0; i < 2; i++) {
+			if (save.buttons[action][i] != INPUT_INVALID && save.buttons[action][i] < INPUT_BUTTON_MAX) {
+				input_bind(INPUT_LAYER_USER, save.buttons[action][i], action);
+			}
 		}
 	}
 
