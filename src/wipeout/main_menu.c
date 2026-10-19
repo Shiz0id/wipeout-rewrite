@@ -624,6 +624,9 @@ static void button_circuit_additional_select(menu_t *menu, int data) {
 }
 
 static void page_circuit_draw(menu_t *menu, int data) {
+	if (data < 0) {
+		return; // "ADDITIONAL CIRCUITS" entry has no preview
+	}
 	vec2i_t pos = vec2i(0, -25);
 	vec2i_t size = vec2i(128, 74);
 	vec2i_t scaled_size = ui_scaled(size);
@@ -644,7 +647,7 @@ static void page_circuit_init(menu_t *menu) {
 		}
 	}
 	if (g.additional_circuits) {
-		menu_page_add_button(page, 0, "ADDITIONAL CIRCUITS", button_circuit_additional_select); 
+		menu_page_add_button(page, -1, "ADDITIONAL CIRCUITS", button_circuit_additional_select); 
 	}
 }
 

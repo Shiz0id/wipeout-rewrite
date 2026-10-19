@@ -49,13 +49,20 @@ image_t *image_load_from_bytes(uint8_t *bytes, bool transparent) {
 		type == TIM_TYPE_PALETTED_4_BPP ||
 		type == TIM_TYPE_PALETTED_8_BPP
 	) {
+		uint32_t clut_start = p;
 		uint32_t header_length = get_i32_le(bytes, &p);
 		uint16_t palette_x = get_i16_le(bytes, &p);
 		uint16_t palette_y = get_i16_le(bytes, &p);
 		uint16_t palette_colors = get_i16_le(bytes, &p);
 		uint16_t palettes = get_i16_le(bytes, &p);
-		for (int i = 0; i < palette_colors; i++) {
+		for (int i = 0; i < min(palette_colors, len(palette)); i++) {
 			palette[i] = tim_16bit_to_rgba(get_u16_le(bytes, &p), transparent);
+		}
+
+		// Skip any additional palettes or excess colors; only the first 256
+		// colors of the first palette are used
+		if (palettes > 1 || palette_colors > len(palette)) {
+			p = clut_start + header_length;
 		}
 	}
 

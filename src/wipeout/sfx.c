@@ -78,7 +78,7 @@ void sfx_load(void) {
 
 	uint32_t sample_index = 0;
 	int32_t history[2] = {0, 0};
-	for (int p = 0; p < vb_size;) {
+	for (int p = 0; p + 16 <= vb_size;) {
 		uint8_t header = vb[p++];
 		uint8_t flags = vb[p++];
 		uint8_t shift = header & 0x0f;
@@ -151,7 +151,7 @@ void sfx_pause(void) {
 // Sound effects
 
 sfx_t *sfx_get_node(sfx_source_t source_index) {
-	error_if(source_index < 0 || source_index > num_sources, "Invalid audio source");
+	error_if(source_index < 0 || source_index >= num_sources, "Invalid audio source");
 
 	sfx_t *sfx = NULL;
 	for (int i = 0; i < SFX_MAX; i++) {
@@ -243,6 +243,9 @@ uint32_t sfx_music_decode_frame(void) {
 }
 
 void sfx_music_rewind(void) {
+	if (!music->file) {
+		return;
+	}
 	fseek(music->file, music->first_frame_pos, SEEK_SET);
 	music->sample_data_len = 0;
 	music->sample_data_pos = 0;

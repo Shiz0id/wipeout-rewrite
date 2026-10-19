@@ -266,7 +266,7 @@ static void button_championship_points_continue(menu_t *menu, int data) {
 		race_next();
 	}
 	else {
-		menu_confirm(menu, "", "RESTART RACE", "RESTART", "QUIT", button_quit_confirm);
+		menu_confirm(menu, "", "RESTART RACE", "RESTART", "QUIT", button_restart_or_quit);
 	}
 }
 

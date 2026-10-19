@@ -26,6 +26,8 @@ menu_page_t *menu_push(menu_t *menu, char *title, void(*draw_func)(menu_t *, int
 	page->draw_func = draw_func;
 	page->entries_len = 0;
 	page->index = 0;
+	page->title_pos = vec2i(0, 0);
+	page->items_pos = vec2i(0, 0);
 	page->title_anchor = UI_POS_MIDDLE | UI_POS_CENTER;
 	page->items_anchor = UI_POS_MIDDLE | UI_POS_CENTER;
 	return page;
@@ -111,6 +113,9 @@ void menu_update(menu_t *menu) {
 
 	if (page->draw_func) {
 		page->draw_func(menu, selected_data);
+
+		// The draw_func may have pushed or popped a page
+		page = &menu->pages[menu->index];
 	}
 
 	render_set_view_2d();
