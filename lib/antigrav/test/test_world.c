@@ -145,6 +145,10 @@ static bool in_range(int i, int start, int count) {
 }
 
 void test_world_make_circuit(test_world_t *tw, bool with_walls) {
+	test_world_make_circuit_ex(tw, with_walls, CIRCUIT_WALL_HEIGHT);
+}
+
+void test_world_make_circuit_ex(test_world_t *tw, bool with_walls, float wall_height) {
 	test_world_init(tw);
 	const int n = CIRCUIT_SAMPLES;
 	vec3_t *c = malloc(sizeof(vec3_t) * n);
@@ -213,8 +217,8 @@ void test_world_make_circuit(test_world_t *tw, bool with_walls) {
 		}
 
 		if (with_walls) {
-			vec3_t wall_i = mulf(up[i], CIRCUIT_WALL_HEIGHT);
-			vec3_t wall_j = mulf(up[j], CIRCUIT_WALL_HEIGHT);
+			vec3_t wall_i = mulf(up[i], wall_height);
+			vec3_t wall_j = mulf(up[j], wall_height);
 			test_world_add_quad(tw, li, lj, add(lj, wall_j), add(li, wall_i), mulf(side[i], -1), 0);
 			test_world_add_quad(tw, ri, rj, add(rj, wall_j), add(ri, wall_i), side[i], 0);
 		}

@@ -40,6 +40,7 @@ bool test_world_raycast_brute(test_world_t *tw, ag_vec3_t origin, ag_vec3_t dir,
 // kill pit and boost pads. Without walls it's an open strip, like a course
 // laid out across open terrain. Fills tw->route.
 void test_world_make_circuit(test_world_t *tw, bool with_walls);
+void test_world_make_circuit_ex(test_world_t *tw, bool with_walls, float wall_height);
 
 // A straight run over a 90 degree convex edge, down a 60m vertical drop and
 // through a concave curve onto the floor below. The curved and vertical
