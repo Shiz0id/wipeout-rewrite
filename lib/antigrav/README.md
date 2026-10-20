@@ -13,17 +13,22 @@ wipEout rewrite's craft code and rebuilt to run on any engine's geometry.
   identical at any frame rate
 - **Handling**: grip that keeps your speed through turns, airbrake drifting,
   boosting past top speed, slipstream drafting, start boost / stall
-- **Walls you can scrape**: grazing a wall costs almost nothing, a head-on hit
-  costs everything; the nose turns along the wall instead of spinning out
+- **Mistakes cost you**: wall hits cost speed by impact angle and riding a wall
+  keeps bleeding it, hard landings cost speed, off-center craft hits spin you,
+  and respawns start from a standstill; the nose turns along a wall instead of
+  spinning out
 - **Later WipEout mechanics**: airbrakes that turn without bleeding speed,
   sideshift (double tap an airbrake), barrel rolls for a boost, nose-down
   diving, mag-strips for loops and vertical drops, optional shield energy with
   wall damage and hyperthrust, and Venom/Flash/Rapier/Phantom speed classes
-- **AI drivers** on the same physics as the player, with speed planning, racing
-  lines, overtaking and rubber banding
-- **Race logic**: laps, lap times, positions, wrong way detection, respawns
-- **Hooks for your weapons** (impulses, spin, boost, thrust scale) and an event
-  queue for audio and effects
+- **AI drivers** on the same physics as the player, in four difficulty levels:
+  speed planning (corners and crests), airbrake cornering, racing lines,
+  drafting and slingshot overtakes, sideshift dodges, boost pad hunting, barrel
+  rolls, hyperthrust, blocking, energy management and optional rubber banding
+- **Race logic**: laps, lap times, positions, wrong way detection, respawns past
+  missed jumps (like a rescue drone), pit lanes
+- **Hooks for your weapons** (impulses, spin, boost, thrust scale, energy,
+  lock-on targeting) and an event queue for audio and effects
 
 The host engine keeps everything else: models, rendering, audio, weapons,
 pickups, UI and cameras. See `INTEGRATION.md` for a step-by-step wiring and
@@ -180,6 +185,7 @@ one core; feed it the geometry around the course rather than a whole map.
 | `AG_SURFACE_KILL` | Water, pits, lava: out of bounds, then a respawn |
 | `AG_SURFACE_WALL` | Force wall behavior on shallow barriers, curbs or glass |
 | `AG_SURFACE_MAGLOCK` | Mag-strips: lock craft to loops, vertical drops and wall rides |
+| `AG_SURFACE_PIT` | Pit lane: recharges energy while driving over it |
 
 `material` is passed through untouched in events, so wall hits and landings can
 pick the right sounds and sparks.
@@ -244,15 +250,29 @@ The handling follows the WipEout 2097 → HD / 2048 lineage:
 | Barrel roll | Steer left-right-left (or right-left-right) quickly while airborne, or `input.barrel_roll` | Costs `barrel_roll_cost` energy even if it fails; completing the roll before landing gives a boost. Not possible on mag-strips (they keep you grounded) |
 | Diving | `input.pitch` < 0 on descents | Gains extra speed downhill (`dive_slope_bonus`); in the air, pitch shortens or stretches jumps |
 | Mag-strips | `AG_SURFACE_MAGLOCK` on the geometry | Locks the craft to the surface (loops, vertical drops), cancels hills, reduces drift |
-| Shield energy | `desc.use_energy = true` | Wall and craft impacts drain it (scraping is free), barrel rolls cost it; the host adds or removes energy with `ag_ship_add_energy()` for pickups, absorbing weapons and weapon damage |
+| Shield energy | `desc.use_energy = true` | Wall impacts, riding walls, craft hits and hard landings drain it (light touches are free), barrel rolls cost it, `AG_SURFACE_PIT` recharges it; the host adds or removes energy with `ag_ship_add_energy()` for pickups, absorbing weapons and weapon damage |
 | Hyperthrust | Hold `input.hyperthrust` (needs `use_energy`) | Burns energy for extra thrust until `hyperthrust_min` |
 | Speed classes | `ag_ship_params_class(&p, AG_CLASS_RAPIER, upm)` | Venom ~420, Flash ~520 (the defaults), Rapier ~660, Phantom ~790 km/h; faster classes accelerate and turn harder |
 
-Measured with defaults: one airbrake for 2 s keeps 89% of top speed; both
+Measured with defaults: one airbrake for 2 s keeps 88% of top speed; both
 airbrakes take you from top speed to 50 m/s in 1.5 s; a sideshift tap moves
-~5 m, held ~6.5 m; a 10° wall graze costs 6 energy, a head-on hit at 120 m/s
-50; craft follow a mag-strip over a 90° edge at 100 m/s without leaving it.
-Zone mode (ever increasing speed) is a host-side `ag_ship_set_params()` ramp.
+~5.5 m, held ~6.5 m; a 10° wall graze plus a second of riding the wall costs
+9 energy, a head-on hit at 120 m/s 36; a clean lap of the test circuit costs
+~11 (one hard landing); craft follow a mag-strip over a 90° edge at 100 m/s
+without leaving it. Zone mode (ever increasing speed) is a host-side
+`ag_ship_set_params()` ramp.
+
+## Mistakes
+
+| Mistake | Cost (defaults) |
+|---|---|
+| Wall hit | Speed by impact angle: keeps ~97% at 5°, ~90% at 10°, ~62% at 30°, bounces back at ~20% head-on |
+| Riding a wall | Keeps bleeding speed (`wall_scrape_drag`, ~25% per second) and energy |
+| Hard landing | Forward speed lost above `landing_speed_min` vertical speed, plus energy |
+| Off-center craft hit | Yaw spin (`ship_hit_spin`) as well as the knock |
+| Flying off a crest too fast | Airborne, maybe over the walls; the AI plans speed for crests, players have to |
+| Out of bounds | `respawn_delay` (1.5 s) with no control, then a standing start (`respawn_speed` 0); missed jumps respawn past the gap |
+| Over-revving at the start | Stall; the start boost window is narrow (62-70% engine) |
 
 ## Weapons and pickups
 
@@ -272,8 +292,10 @@ ag_ship_apply_impulse(world, target, scale(shot_dir, 8 * m));
 ```
 
 For projectiles, use the craft's `position`, `velocity` and `forward` from
-`ag_ship_state()`. `rank` and `total_progress` tell you who's ahead for homing
-weapons, and `lateral_offset` tells you where on the track each craft is.
+`ag_ship_state()`. `ag_ship_find_target(world, ship, max_distance,
+max_angle)` returns the nearest craft ahead within a cone for missile locks
+(human or AI). `rank` and `total_progress` tell you who's ahead, and
+`lateral_offset` where on the track each craft is.
 
 
 ## Tuning
@@ -284,10 +306,10 @@ the test report with defaults:
 | | |
 |---|---|
 | 0-100 m/s | 2.5 s |
-| Top speed | 145 m/s (522 km/h); ~190 m/s with boost pads and drafting |
-| Turn radius at top speed | 97 m full steer; 32 m drifting with the airbrake (losing ~40% of the speed) |
-| Wall hit at 10° / 30° / 90° | keeps 97% / 73% / 8% of the speed |
-| AI average race speed | ~88% of top speed on the test circuit |
+| Top speed | 145 m/s (522 km/h); ~190 m/s with boost pads, drafting or a barrel roll boost |
+| Turn radius at top speed | 112 m full steer, so high-speed corners need the airbrakes; 29 m drifting (keeping ~55% of the speed) |
+| Wall hit at 10° / 30° / 90° | keeps 90% / 62% / ~20% of the speed |
+| AI average race speed | ~86% of top speed on the test circuit (Expert) |
 
 What to change for what you feel:
 
@@ -309,14 +331,38 @@ What to change for what you feel:
 | Jumps hang longer | lower `desc.gravity` |
 | Sideshift further / snappier | `sideshift_speed`, `sideshift_time`, `sideshift_max_time` |
 | Barrel rolls easier | lower `barrel_roll_time`, raise `gesture_window` |
-| Walls hurt more / less (energy) | `wall_damage`, `wall_damage_min` |
+| Walls hurt more / less (energy) | `wall_damage`, `wall_damage_min`, `wall_scrape_damage` |
+| Riding walls hurts more / less | `wall_scrape_drag` |
+| Landings hurt more / less | `landing_speed_min`, `landing_speed_loss`, `landing_damage` |
+| Craft contact matters more | `ship_hit_spin`, `ship_damage`, `ship_damage_min` |
+| Easier mode | raise `grip`, `turn_rate_at_top_speed`, `wall_graze`; lower `wall_friction`, `wall_scrape_drag`; set `desc.respawn_speed` |
 
 Craft classes and teams are just different parameter sets, and
 `ag_ship_set_params()` can change them at any time (e.g. for upgrades).
 
-AI difficulty: `skill` (cornering margin and precision), `speed_scale` (raw
-pace), `racing_line` (corner cutting), `catchup` (e.g. 0.05 for 5% rubber banding
-against the leading human).
+## AI
+
+`ag_ai_params_difficulty(&ai, AG_AI_NOVICE | AG_AI_PILOT | AG_AI_EXPERT |
+AG_AI_ELITE)` gives a preset; `ag_ai_params_default()` is Expert. Best laps on
+the test circuit: Novice 25.8 s, Pilot 24.3 s, Expert 23.8 s, Elite 23.5 s.
+
+| Parameter | Effect |
+|---|---|
+| `skill` | Cornering speed margin, airbrake use for rotation, steering precision |
+| `speed_scale` | Raw pace (thrust multiplier) |
+| `racing_line` | How much it cuts into corners |
+| `tricks` | Boost pad hunting, drafting and slingshot overtakes, sideshift dodges, barrel rolls on long jumps, hyperthrust in battles |
+| `aggression` | Blocking craft that try to pass; spending energy more freely |
+| `catchup` | Rubber banding against the leading human (e.g. 0.05 = ±5% thrust) |
+| `line_offset` | Preferred lateral position; give each AI a different one |
+| `start_reaction` | Delay before opening the throttle at GO |
+
+AI drivers plan speed for corners **and crests** (so they don't fly off at
+boosted speed), keep an energy reserve before spending it on rolls or
+hyperthrust, and learn where boost pads are from craft driving over them (no
+authoring needed). They don't fire weapons: the host decides that, e.g. with
+`ag_ship_find_target()` for a lock and `state->energy` to decide when to absorb
+a pickup instead.
 
 
 ## Sense of speed is half camera

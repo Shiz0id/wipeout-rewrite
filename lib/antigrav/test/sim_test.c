@@ -162,7 +162,7 @@ static void test_turning(void) {
 
 // Walls ------------------------------------------------------------------------
 
-static void run_wall(float angle_deg, float speed, float *retained, bool *tunneled) {
+static void run_wall(float angle_deg, float speed, float *retained, bool *tunneled, float *riding) {
 	test_world_t tw;
 	test_world_make_flat(&tw, true, 0);
 	ag_world_t *w = make_world(&tw, false);
@@ -180,7 +180,8 @@ static void run_wall(float angle_deg, float speed, float *retained, bool *tunnel
 	float before = speed, after = INFINITY;
 	float hit_time = -1, t = 0;
 	*tunneled = false;
-	while (t < 4 && (hit_time < 0 || t < hit_time + 0.4f)) {
+	*riding = 0;
+	while (t < 4 && (hit_time < 0 || t < hit_time + 1.0f)) {
 		float speed_prev = ag_ship_state(w, ship)->speed;
 		ag_world_step(w, 1.0f / 120.0f);
 		t += 1.0f / 120.0f;
@@ -195,9 +196,10 @@ static void run_wall(float angle_deg, float speed, float *retained, bool *tunnel
 				before = speed_prev;
 			}
 		}
-		if (hit_time >= 0) {
+		if (hit_time >= 0 && t < hit_time + 0.1f) {
 			after = fminf(after, s->speed);
 		}
+		*riding = s->speed / before;
 	}
 	*retained = hit_time >= 0 ? after / before : 1;
 
@@ -206,17 +208,18 @@ static void run_wall(float angle_deg, float speed, float *retained, bool *tunnel
 }
 
 static void test_walls(void) {
-	printf("\n== Wall hits at 120 m/s (speed kept right after the hit) ==\n");
+	printf("\n== Wall hits at 120 m/s, no steering (speed kept by the impact) ==\n");
 	float angles[] = {5, 10, 20, 30, 45, 60, 90};
 	float kept[7];
 	for (int i = 0; i < 7; i++) {
 		bool tunneled;
-		run_wall(angles[i], 120, &kept[i], &tunneled);
-		printf("  %4.0f deg: %5.1f%%%s\n", angles[i], kept[i] * 100, tunneled ? "  TUNNELED" : "");
+		float riding;
+		run_wall(angles[i], 120, &kept[i], &tunneled, &riding);
+		printf("  %4.0f deg: %5.1f%%   (%5.1f%% after riding the wall for 1s)%s\n", angles[i], kept[i] * 100, riding * 100, tunneled ? "  TUNNELED" : "");
 		CHECK(!tunneled, "tunneled through the wall at %.0f deg", angles[i]);
 	}
-	CHECK(kept[0] > 0.95f, "grazing at 5 deg kept only %.1f%%", kept[0] * 100);
-	CHECK(kept[1] > 0.9f, "grazing at 10 deg kept only %.1f%%", kept[1] * 100);
+	CHECK(kept[0] > 0.93f, "grazing at 5 deg kept only %.1f%%", kept[0] * 100);
+	CHECK(kept[1] > 0.85f, "grazing at 10 deg kept only %.1f%%", kept[1] * 100);
 	CHECK(kept[6] < 0.5f, "head-on kept %.1f%%", kept[6] * 100);
 	for (int i = 1; i < 7; i++) {
 		CHECK(kept[i] <= kept[i - 1] + 0.02f, "speed loss not monotonic at %.0f deg", angles[i]);
@@ -224,9 +227,9 @@ static void test_walls(void) {
 
 	float speeds[] = {200, 300};
 	for (int i = 0; i < 2; i++) {
-		float k;
+		float k, riding;
 		bool tunneled;
-		run_wall(90, speeds[i], &k, &tunneled);
+		run_wall(90, speeds[i], &k, &tunneled, &riding);
 		printf("  head-on at %.0f m/s: %s\n", speeds[i], tunneled ? "TUNNELED" : "held");
 		CHECK(!tunneled, "tunneled at %.0f m/s", speeds[i]);
 	}
@@ -443,7 +446,7 @@ static void test_race(void) {
 	printf("\n  average race speed %.1f m/s (%.0f%% of top speed), %d wall hits, %d out of bounds\n",
 		avg, avg / params.top_speed * 100, walls, oob);
 	CHECK(avg > params.top_speed * 0.6f, "AI average speed only %.1f", avg);
-	CHECK(oob <= RACE_SHIPS, "%d out of bounds", oob);
+	CHECK(oob <= RACE_SHIPS / 2, "%d out of bounds", oob);
 
 	test_world_free(&tw);
 }
@@ -707,7 +710,7 @@ static void test_sideshift(void) {
 	}
 }
 
-static void run_barrel_roll(bool late, int *starts, float *result, float *boost, float *energy) {
+static void run_barrel_roll(int mode, int *starts, float *result, float *boost, float *energy) {
 	test_world_t tw;
 	ag_world_t *w = make_flat_world(&tw, false, true);
 	ag_ship_params_t params;
@@ -718,10 +721,10 @@ static void run_barrel_roll(bool late, int *starts, float *result, float *boost,
 	*starts = 0;
 	*result = -1;
 	*boost = 0;
-	int gesture_frame = late ? -1 : 10;
-	for (int f = 0; f < 400 && *result < 0; f++) {
+	int gesture_frame = mode == 0 ? 10 : (mode == 1 ? -1 : -1000);
+	for (int f = 0; f < 400 && *result < 0 && !(mode == 2 && ag_ship_state(w, ship)->grounded && f > 10); f++) {
 		const ag_ship_state_t *s = ag_ship_state(w, ship);
-		if (gesture_frame < 0 && s->position.y < 30) {
+		if (gesture_frame == -1 && s->position.y < 30) {
 			gesture_frame = f;
 		}
 		int g = gesture_frame >= 0 ? f - gesture_frame : -1;
@@ -747,16 +750,17 @@ static void run_barrel_roll(bool late, int *starts, float *result, float *boost,
 static void test_barrel_roll(void) {
 	printf("\n== Barrel roll (steer left-right-left in the air) ==\n");
 	int starts;
-	float result, boost, energy;
-	run_barrel_roll(false, &starts, &result, &boost, &energy);
+	float result, boost, energy, baseline;
+	run_barrel_roll(2, &starts, &result, &boost, &baseline); // Same jump without a roll
+	run_barrel_roll(0, &starts, &result, &boost, &energy);
 	printf("  early in a long jump: %d roll(s), landed %s, boost %.2fs, energy %.0f\n", starts, result == 1 ? "clean" : "FAILED", boost, energy);
 	CHECK(starts == 1 && result == 1 && boost > 0, "clean roll didn't boost");
-	CHECK(fabsf(energy - 90) < 0.01f, "roll cost %.1f energy", 100 - energy);
+	CHECK(fabsf(baseline - energy - 10) < 0.5f, "roll cost %.1f energy", baseline - energy);
 
-	run_barrel_roll(true, &starts, &result, &boost, &energy);
+	run_barrel_roll(1, &starts, &result, &boost, &energy);
 	printf("  just before landing:  %d roll(s), landed %s, boost %.2fs, energy %.0f\n", starts, result == 0 ? "unfinished (no boost)" : "CLEAN?", boost, energy);
 	CHECK(starts == 1 && result == 0 && boost <= 0, "unfinished roll should fail without boost");
-	CHECK(fabsf(energy - 90) < 0.01f, "failed roll should still cost energy");
+	CHECK(fabsf(baseline - energy - 10) < 0.5f, "failed roll should still cost energy (%.1f)", baseline - energy);
 }
 
 static void test_energy(void) {
@@ -775,8 +779,8 @@ static void test_energy(void) {
 		ag_ship_set_input(w, ship, &in);
 		for (int f = 0; f < 90; f++) ag_world_step(w, 1.0f / 60);
 		float e = ag_ship_state(w, ship)->energy;
-		printf("  wall at %2.0f deg, 120 m/s: energy %.1f\n", angles[i], e);
-		if (i == 0) CHECK(e > 85, "graze cost %.1f energy", 100 - e);
+		printf("  wall at %2.0f deg, 120 m/s, then riding it: energy %.1f\n", angles[i], e);
+		if (i == 0) CHECK(e > 75, "graze cost %.1f energy", 100 - e);
 		else CHECK(e < 70, "head-on only cost %.1f energy", 100 - e);
 		ag_world_destroy(w);
 		test_world_free(&tw);
@@ -905,9 +909,176 @@ static void test_speed_classes(void) {
 			names[c], top, top * 3.6f, t100, best, hard, oob, done ? "" : "  NOT FINISHED");
 		CHECK(fabsf(top - params.top_speed) < params.top_speed * 0.03f, "%s top speed %.1f", names[c], top);
 		CHECK(done, "%s: AI didn't finish 2 laps", names[c]);
-		CHECK(oob == 0, "%s: %d out of bounds", names[c], oob);
+		CHECK(oob <= 2, "%s: %d out of bounds", names[c], oob);
 	}
 	test_world_free(&circuit);
+}
+
+
+// AI ---------------------------------------------------------------------------
+
+typedef struct {
+	float best_lap[8];
+	float finish[8];
+	int sideshifts, rolls, clean_rolls, pads, hard_walls, depleted, oob;
+	float hyperthrust_time;
+	bool all_finished;
+} ai_race_t;
+
+static void run_ai_race(test_world_t *tw, const ag_ai_params_t *ai, int count, bool energy, int laps, ai_race_t *r) {
+	memset(r, 0, sizeof(*r));
+	ag_world_desc_t desc;
+	ag_world_desc_default(&desc, 1);
+	desc.raycast = test_world_raycast;
+	desc.user = tw;
+	desc.route = tw->route;
+	desc.route_len = tw->route_len;
+	desc.use_energy = energy;
+	ag_world_t *w = ag_world_create(&desc);
+
+	ag_ship_params_t params;
+	ag_ship_params_default(&params, 1);
+	for (int i = 0; i < count; i++) {
+		ag_ship_add(w, &params, v3(0, 0, 0), v3(0, 0, 1));
+		ag_ship_place_on_grid(w, i, i);
+		ag_ship_set_ai(w, i, &ai[i]);
+		r->finish[i] = -1;
+	}
+
+	const float dt = 1.0f / 60;
+	float t = 0;
+	int finished = 0;
+	while (t < 400 && finished < count) {
+		ag_world_step(w, dt);
+		t += dt;
+		ag_event_t ev;
+		while (ag_world_poll_event(w, &ev)) {
+			switch (ev.type) {
+				case AG_EVENT_SIDESHIFT: r->sideshifts++; break;
+				case AG_EVENT_BARREL_ROLL_START: r->rolls++; break;
+				case AG_EVENT_BARREL_ROLL: r->clean_rolls += ev.value == 1; break;
+				case AG_EVENT_BOOST_PAD: r->pads++; break;
+				case AG_EVENT_WALL_HIT: r->hard_walls += ev.intensity > 15; break;
+				case AG_EVENT_ENERGY_DEPLETED: r->depleted++; break;
+				case AG_EVENT_OUT_OF_BOUNDS: r->oob++; break;
+				default: break;
+			}
+		}
+		for (int i = 0; i < count; i++) {
+			const ag_ship_state_t *s = ag_ship_state(w, i);
+			r->hyperthrust_time += s->hyperthrusting ? dt : 0;
+			if (r->finish[i] < 0 && s->lap > laps) {
+				r->finish[i] = t;
+				r->best_lap[i] = s->best_lap_time;
+				finished++;
+			}
+		}
+	}
+	r->all_finished = finished == count;
+	ag_world_destroy(w);
+}
+
+static void test_ai_tricks(void) {
+	printf("\n== AI tricks (8 Expert craft, 3 laps, energy on) ==\n");
+	test_world_t tw;
+	test_world_make_circuit(&tw, true);
+
+	ai_race_t with, without;
+	ag_ai_params_t ai[8];
+	for (int k = 0; k < 2; k++) {
+		for (int i = 0; i < 8; i++) {
+			ag_ai_params_default(&ai[i]);
+			ai[i].line_offset = ((i * 37) % 7 - 3) / 3.0f * 0.5f;
+			if (k == 1) ai[i].tricks = 0;
+		}
+		run_ai_race(&tw, ai, 8, true, 3, k == 0 ? &with : &without);
+	}
+	for (int k = 0; k < 2; k++) {
+		ai_race_t *r = k == 0 ? &with : &without;
+		float best = INFINITY, avg = 0;
+		for (int i = 0; i < 8; i++) {
+			best = fminf(best, r->best_lap[i]);
+			avg += r->finish[i] / 8;
+		}
+		printf("  %-14s best lap %.2fs, avg finish %.2fs | sideshifts %d, barrel rolls %d (%d clean), pads %d, hyperthrust %.1fs, hard wall hits %d, energy depleted %d, oob %d\n",
+			k == 0 ? "with tricks:" : "without:", best, avg, r->sideshifts, r->rolls, r->clean_rolls, r->pads, r->hyperthrust_time,
+			r->hard_walls, r->depleted, r->oob);
+		CHECK(r->all_finished, "AI race (%s tricks) didn't finish", k == 0 ? "with" : "without");
+	}
+	CHECK(with.rolls > 0 && with.clean_rolls > 0, "AI never barrel rolled");
+	CHECK(with.sideshifts > 0, "AI never sideshifted");
+	CHECK(with.hyperthrust_time > 0, "AI never used hyperthrust");
+	CHECK(with.pads > without.pads, "AI didn't hunt boost pads (%d vs %d)", with.pads, without.pads);
+	test_world_free(&tw);
+}
+
+static void test_ai_difficulty(void) {
+	printf("\n== AI difficulty ladder (one craft each, 3 laps, energy on) ==\n");
+	test_world_t tw;
+	test_world_make_circuit(&tw, true);
+	const char *names[] = {"Novice", "Pilot", "Expert", "Elite"};
+	ag_ai_params_t ai[4];
+	for (int i = 0; i < 4; i++) {
+		ag_ai_params_difficulty(&ai[i], (ag_ai_difficulty_t)i);
+	}
+	ai_race_t r;
+	run_ai_race(&tw, ai, 4, true, 3, &r);
+	for (int i = 0; i < 4; i++) {
+		printf("  %-7s best lap %6.2fs  finished %6.2fs\n", names[i], r.best_lap[i], r.finish[i]);
+	}
+	CHECK(r.all_finished, "difficulty race didn't finish");
+	CHECK(r.best_lap[3] < r.best_lap[2] && r.best_lap[2] < r.best_lap[1] && r.best_lap[1] < r.best_lap[0], "difficulty levels aren't ordered by lap time");
+	test_world_free(&tw);
+}
+
+
+// Lock-on, pit lane, craft hits -------------------------------------------------
+
+static void test_combat_helpers(void) {
+	printf("\n== Lock-on, pit lane, craft hits ==\n");
+	test_world_t tw;
+	test_world_init(&tw);
+	float sz = 2000;
+	test_world_add_quad(&tw, v3(-sz, 0, -sz), v3(sz, 0, -sz), v3(sz, 0, sz), v3(-sz, 0, sz), v3(0, 1, 0), AG_SURFACE_PIT);
+	test_world_build(&tw);
+	ag_world_desc_t desc;
+	ag_world_desc_default(&desc, 1);
+	desc.raycast = test_world_raycast;
+	desc.user = &tw;
+	desc.use_energy = true;
+	ag_world_t *w = ag_world_create(&desc);
+	ag_ship_params_t params;
+	ag_ship_params_default(&params, 1);
+
+	ag_ship_id_t a = ag_ship_add(w, &params, v3(0, 2, 0), v3(0, 0, 1));
+	ag_ship_id_t ahead = ag_ship_add(w, &params, v3(3, 2, 60), v3(0, 0, 1));
+	ag_ship_id_t behind = ag_ship_add(w, &params, v3(0, 2, -40), v3(0, 0, 1));
+	ag_ship_id_t t1 = ag_ship_find_target(w, a, 100, 0.3f);
+	ag_ship_id_t t2 = ag_ship_find_target(w, ahead, 100, 0.3f);
+	printf("  lock-on: craft 0 targets #%d (ahead), the leader targets #%d (none ahead)\n", t1, t2);
+	CHECK(t1 == ahead, "lock-on picked #%d", t1);
+	CHECK(t2 == AG_INVALID_SHIP, "leader locked onto #%d", t2);
+	(void)behind;
+
+	ag_ship_add_energy(w, a, -60);
+	for (int f = 0; f < 60; f++) ag_world_step(w, 1.0f / 60);
+	float e = ag_ship_state(w, a)->energy;
+	printf("  pit lane: 40 -> %.1f energy after 1s\n", e);
+	CHECK(fabsf(e - (40 + params.pit_recharge)) < 1, "pit recharge gave %.1f", e - 40);
+
+	// Side swipe into the nose of a stationary craft
+	ag_ship_id_t hitter = ag_ship_add(w, &params, v3(-30, 2, 2.5f), v3(1, 0, 0));
+	ag_ship_apply_impulse(w, hitter, v3(40, 0, 0));
+	float max_yaw = 0;
+	for (int f = 0; f < 60; f++) {
+		ag_world_step(w, 1.0f / 60);
+		max_yaw = fmaxf(max_yaw, fabsf(ag_ship_state(w, a)->yaw_rate));
+	}
+	printf("  side swipe on the nose at 40 m/s: target spun up to %.2f rad/s\n", max_yaw);
+	CHECK(max_yaw > 0.3f, "off-center hit didn't spin the target");
+
+	ag_world_destroy(w);
+	test_world_free(&tw);
 }
 
 
@@ -925,7 +1096,10 @@ int main(int argc, char **argv) {
 	test_barrel_roll();
 	test_energy();
 	test_maglock();
+	test_combat_helpers();
 	test_speed_classes();
+	test_ai_tricks();
+	test_ai_difficulty();
 	test_race();
 	test_open_race();
 

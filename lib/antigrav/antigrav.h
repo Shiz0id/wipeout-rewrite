@@ -52,6 +52,7 @@ enum {
 	AG_SURFACE_NO_MAGNET = 1 << 2, // Jump ramps: no downforce, the craft flies off the lip
 	AG_SURFACE_KILL      = 1 << 3, // Out of bounds (pits, water); triggers a respawn
 	AG_SURFACE_MAGLOCK   = 1 << 4, // Mag-strip: locks the craft to the surface (loops, vertical drops)
+	AG_SURFACE_PIT       = 1 << 5, // Pit lane: recharges energy (with use_energy)
 };
 
 typedef struct {
@@ -104,7 +105,8 @@ typedef struct {
 	// If false, only AG_EVENT_OUT_OF_BOUNDS is emitted and the host calls
 	// ag_ship_respawn() itself. AI craft always respawn automatically.
 	bool auto_respawn;
-	float respawn_delay;     // Seconds; default 1.0
+	float respawn_delay;     // Seconds; default 1.5
+	float respawn_speed;     // Speed after a respawn as a fraction of top speed; default 0
 
 	// Optional shield energy: wall and craft hits drain it, barrel rolls cost
 	// it and hyperthrust burns it. antigrav only reports AG_EVENT_ENERGY_DEPLETED;
@@ -190,8 +192,12 @@ typedef struct {
 	// Energy (ag_world_desc_t.use_energy)
 	float energy_max;
 	float wall_damage;         // Energy per unit of impact speed above wall_damage_min
-	float wall_damage_min;     // Impact speed that's free (scraping along a wall)
-	float ship_damage;         // Energy per unit of impact speed, craft vs. craft
+	float wall_damage_min;     // Impact speed that's free (light touches)
+	float wall_scrape_damage;  // Energy per second while scraping along a wall
+	float landing_damage;      // Energy per unit of vertical speed above landing_speed_min
+	float pit_recharge;        // Energy per second on AG_SURFACE_PIT
+	float ship_damage;         // Energy per unit of impact speed above ship_damage_min, craft vs. craft
+	float ship_damage_min;     // Impact speed that's free (nudges)
 	float hyperthrust_accel;
 	float hyperthrust_drain;   // Energy per second
 	float hyperthrust_min;     // Cuts out below this fraction of energy_max
@@ -216,8 +222,14 @@ typedef struct {
 	// Walls
 	float wall_restitution;    // Bounce off the wall (0..1)
 	float wall_friction;       // Speed lost on a head-on hit (0..1)
-	float wall_graze;          // sin(angle) below which a hit is a lossless scrape
+	float wall_graze;          // sin(angle) below which a hit costs no extra speed
 	float wall_align;          // How much a hit turns the nose along the wall (0..1)
+	float wall_scrape_drag;    // Speed lost while scraping along a wall (1/s)
+
+	// Landings and craft hits
+	float landing_speed_min;   // Vertical landing speed that's free
+	float landing_speed_loss;  // Forward speed lost per unit of vertical speed above it
+	float ship_hit_spin;       // Yaw kick from off-center craft hits
 
 	// Boost & drafting
 	float boost_pad_accel;
@@ -256,15 +268,25 @@ void ag_ship_params_class(ag_ship_params_t *params, ag_speed_class_t speed_class
 // AI ---------------------------------------------------------------------------
 
 typedef struct {
-	float skill;               // 0..1: cornering precision and margin
+	float skill;               // 0..1: cornering speed, precision and airbrake use
 	float speed_scale;         // Multiplier for thrust (e.g. 0.9..1.05)
 	float line_offset;         // -1..1: preferred lateral offset, fraction of half width
 	float racing_line;         // 0..1: how much to cut corners
 	float catchup;             // 0..: thrust bonus/malus relative to the human leader (rubber banding)
 	float start_reaction;      // Seconds before the AI opens the throttle at race start
+	float tricks;              // 0..1: boost pad hunting, drafting, sideshift overtakes, barrel rolls, hyperthrust
+	float aggression;          // 0..1: blocking craft that try to pass
 } ag_ai_params_t;
 
+typedef enum {
+	AG_AI_NOVICE,
+	AG_AI_PILOT,
+	AG_AI_EXPERT,              // ag_ai_params_default()
+	AG_AI_ELITE,
+} ag_ai_difficulty_t;
+
 void ag_ai_params_default(ag_ai_params_t *params);
+void ag_ai_params_difficulty(ag_ai_params_t *params, ag_ai_difficulty_t difficulty);
 
 
 // Craft ------------------------------------------------------------------------
@@ -354,6 +376,10 @@ void ag_ship_apply_impulse(ag_world_t *world, ag_ship_id_t ship, ag_vec3_t delta
 void ag_ship_apply_spin(ag_world_t *world, ag_ship_id_t ship, float delta_yaw_rate); // rad/s, positive = right
 void ag_ship_boost(ag_world_t *world, ag_ship_id_t ship, float accel, float duration);
 void ag_ship_set_thrust_scale(ag_world_t *world, ag_ship_id_t ship, float scale);   // e.g. 0.5 while hit by an EMP
+
+// Nearest craft ahead within max_distance and max_angle (radians) of the
+// craft's nose, for weapon lock-on (human or AI). AG_INVALID_SHIP if none.
+ag_ship_id_t ag_ship_find_target(ag_world_t *world, ag_ship_id_t ship, float max_distance, float max_angle);
 
 // Add (or with a negative amount, remove) shield energy, e.g. for absorbed
 // pickups or weapon damage. Clamped to 0..energy_max; returns the new energy.

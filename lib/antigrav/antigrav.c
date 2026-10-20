@@ -121,6 +121,8 @@ typedef struct {
 	float ai_lateral;
 	float ai_thrust_scale;
 	float ai_start_timer;
+	bool ai_hyperthrust;
+	float ai_hyperthrust_cooldown;
 
 	// Race
 	int route_seg;
@@ -155,6 +157,13 @@ struct ag_world_t {
 	ag_event_t events[AG_MAX_EVENTS];
 	int events_head;
 	int events_len;
+
+	// Boost pads found by craft driving over them, for the AI
+	struct {
+		float progress;
+		float lateral;
+	} pads[64];
+	int pads_len;
 };
 
 
@@ -456,7 +465,8 @@ void ag_world_desc_default(ag_world_desc_t *desc, float units_per_meter) {
 	desc->right_handed = true;
 	desc->route_closed = true;
 	desc->auto_respawn = true;
-	desc->respawn_delay = 1.0f;
+	desc->respawn_delay = 1.5f;
+	desc->respawn_speed = 0;
 }
 
 void ag_ship_params_default(ag_ship_params_t *p, float m) {
@@ -473,11 +483,11 @@ void ag_ship_params_default(ag_ship_params_t *p, float m) {
 		.coast_drag = 1.6f,
 
 		.turn_rate = 2.2f,
-		.turn_rate_at_top_speed = 0.6f,
+		.turn_rate_at_top_speed = 0.5f,
 		.turn_accel = 11.0f,
 		.turn_return = 9.0f,
 		.steer_curve = 1.4f,
-		.grip = 7.0f,
+		.grip = 5.5f,
 		.slip_scrub = 0.25f,
 
 		.airbrake_yaw = 0.9f,
@@ -505,9 +515,13 @@ void ag_ship_params_default(ag_ship_params_t *p, float m) {
 		.maglock_grip = 2.0f,
 
 		.energy_max = 100.0f,
-		.wall_damage = 0.35f / m,
+		.wall_damage = 0.25f / m,
 		.wall_damage_min = 3.0f * m,
-		.ship_damage = 0.15f / m,
+		.wall_scrape_damage = 4.0f,
+		.landing_damage = 0.3f / m,
+		.pit_recharge = 25.0f,
+		.ship_damage = 0.12f / m,
+		.ship_damage_min = 4.0f * m,
 		.hyperthrust_accel = 30.0f * m,
 		.hyperthrust_drain = 25.0f,
 		.hyperthrust_min = 0.25f,
@@ -528,9 +542,14 @@ void ag_ship_params_default(ag_ship_params_t *p, float m) {
 		.air_drag = 0.6f,
 
 		.wall_restitution = 0.25f,
-		.wall_friction = 0.45f,
-		.wall_graze = 0.25f,
+		.wall_friction = 0.6f,
+		.wall_graze = 0.05f,
 		.wall_align = 0.6f,
+		.wall_scrape_drag = 0.6f,
+
+		.landing_speed_min = 15.0f * m,
+		.landing_speed_loss = 0.8f,
+		.ship_hit_spin = 0.05f / m,
 
 		.boost_pad_accel = 70.0f * m,
 		.boost_pad_time = 0.6f,
@@ -539,8 +558,8 @@ void ag_ship_params_default(ag_ship_params_t *p, float m) {
 		.draft_width = 3.5f * m,
 		.draft_drag_reduction = 0.15f,
 
-		.start_boost_min = 0.6f,
-		.start_boost_max = 0.72f,
+		.start_boost_min = 0.62f,
+		.start_boost_max = 0.70f,
 		.start_boost_time = 1.0f,
 		.start_stall_above = 0.9f,
 		.start_stall_time = 1.0f,
@@ -574,15 +593,19 @@ void ag_ship_params_class(ag_ship_params_t *p, ag_speed_class_t speed_class, flo
 	p->maglock_magnet *= k * k;
 }
 
-void ag_ai_params_default(ag_ai_params_t *ai) {
-	*ai = (ag_ai_params_t){
-		.skill = 0.8f,
-		.speed_scale = 1.0f,
-		.line_offset = 0.0f,
-		.racing_line = 0.7f,
-		.catchup = 0.0f,
-		.start_reaction = 0.15f,
+void ag_ai_params_difficulty(ag_ai_params_t *ai, ag_ai_difficulty_t difficulty) {
+	static const ag_ai_params_t levels[] = {
+		[AG_AI_NOVICE] = {.skill = 0.35f, .speed_scale = 0.92f, .racing_line = 0.4f, .start_reaction = 0.5f, .tricks = 0.0f, .aggression = 0.0f},
+		[AG_AI_PILOT]  = {.skill = 0.6f,  .speed_scale = 0.96f, .racing_line = 0.6f, .start_reaction = 0.3f, .tricks = 0.35f, .aggression = 0.2f},
+		[AG_AI_EXPERT] = {.skill = 0.85f, .speed_scale = 1.0f,  .racing_line = 0.75f, .start_reaction = 0.15f, .tricks = 0.8f, .aggression = 0.5f},
+		[AG_AI_ELITE]  = {.skill = 1.0f,  .speed_scale = 1.03f, .racing_line = 0.85f, .start_reaction = 0.08f, .tricks = 1.0f, .aggression = 0.8f},
 	};
+	int d = difficulty < AG_AI_NOVICE ? AG_AI_NOVICE : (difficulty > AG_AI_ELITE ? AG_AI_ELITE : difficulty);
+	*ai = levels[d];
+}
+
+void ag_ai_params_default(ag_ai_params_t *ai) {
+	ag_ai_params_difficulty(ai, AG_AI_EXPERT);
 }
 
 
@@ -772,6 +795,13 @@ static void ship_wall_response(ag_world_t *w, int id, ship_t *sh, vec3_t wall_no
 	ag_ship_params_t *p = &sh->params;
 	vec3_t v = sh->s.velocity;
 	float vn = vec3_dot(v, wall_normal);
+
+	// Scraping along a wall costs speed and energy for as long as it lasts
+	float dt = w->desc.fixed_dt;
+	vec3_t scrape = vec3_on_plane(vec3_on_plane(v, wall_normal), plane_n);
+	v = vec3_sub(v, vec3_mulf(scrape, minf(p->wall_scrape_drag * dt, 1)));
+	ship_damage(w, id, sh, p->wall_scrape_damage * dt, hit->position);
+	sh->s.velocity = v;
 	if (vn >= 0) {
 		return;
 	}
@@ -898,6 +928,26 @@ static void ship_collide_walls(ag_world_t *w, int id, ship_t *sh, vec3_t prev_po
 // Craft step -------------------------------------------------------------------
 
 static void ship_ai_input(ag_world_t *w, int id, ship_t *sh, float dt, ag_input_t *in);
+
+static void world_learn_pad(ag_world_t *w, float progress, float lateral) {
+	if (!w->route) {
+		return;
+	}
+	for (int i = 0; i < w->pads_len; i++) {
+		float d = fabsf(w->pads[i].progress - progress);
+		if (w->desc.route_closed) {
+			d = minf(d, w->route_length - d);
+		}
+		if (d < 15 * w->meter && fabsf(w->pads[i].lateral - lateral) < 4 * w->meter) {
+			return;
+		}
+	}
+	if (w->pads_len < (int)(sizeof(w->pads) / sizeof(w->pads[0]))) {
+		w->pads[w->pads_len].progress = progress;
+		w->pads[w->pads_len].lateral = lateral;
+		w->pads_len++;
+	}
+}
 
 static void ship_step(ag_world_t *w, int id, ship_t *sh, float dt) {
 	ag_ship_params_t *p = &sh->params;
@@ -1050,6 +1100,14 @@ static void ship_step(ag_world_t *w, int id, ship_t *sh, float dt) {
 			}
 			s->air_time = 0;
 
+			// Coming down hard costs speed (and energy)
+			float excess = -vn - p->landing_speed_min;
+			float speed_t = vec3_len(vt);
+			if (excess > 0 && speed_t > 1e-3f) {
+				vt = vec3_mulf(vt, maxf(speed_t - p->landing_speed_loss * excess, 0) / speed_t);
+				ship_damage(w, id, sh, p->landing_damage * excess, s->position);
+			}
+
 			// A barrel roll pays off only if it was completed before landing
 			if (sh->roll_dir != 0) {
 				bool clean = s->barrel_roll >= 1;
@@ -1112,9 +1170,15 @@ static void ship_step(ag_world_t *w, int id, ship_t *sh, float dt) {
 			vt = vec3_mulf(dir, speed);
 		}
 
+		if ((g.flags & AG_SURFACE_PIT) && w->desc.use_energy) {
+			s->energy = minf(s->energy + p->pit_recharge * dt, p->energy_max);
+			sh->energy_depleted = s->energy <= 0;
+		}
+
 		// Boost pads
 		if (g.flags & AG_SURFACE_BOOST) {
 			if (!sh->on_boost_pad) {
+				world_learn_pad(w, s->route_progress, s->lateral_offset * w->hand);
 				vt = vec3_add(vt, vec3_mulf(fwd, p->boost_pad_kick));
 				event_push(w, AG_EVENT_BOOST_PAD, id, AG_INVALID_SHIP, 0, 0, s->position, n, g.material);
 			}
@@ -1296,6 +1360,14 @@ static void ship_step(ag_world_t *w, int id, ship_t *sh, float dt) {
 
 // Craft vs. craft --------------------------------------------------------------
 
+// Off-center hits (towards the nose or tail) spin the craft
+static void ship_hit_spin(ship_t *sh, vec3_t toward_other, vec3_t delta_velocity) {
+	float hz = sh->params.half_extents.z;
+	vec3_t offset = vec3_mulf(sh->s.forward, vec3_dot(toward_other, sh->s.forward) * hz);
+	float torque = vec3_dot(vec3_cross(offset, delta_velocity), sh->s.up) / hz;
+	sh->yaw_rate += sh->params.ship_hit_spin * torque;
+}
+
 static void ships_collide(ag_world_t *w) {
 	for (int a = 0; a < AG_MAX_SHIPS; a++) {
 		ship_t *sa = &w->ships[a];
@@ -1328,12 +1400,16 @@ static void ships_collide(ag_world_t *w) {
 				continue;
 			}
 			float j = -(1 + 0.35f) * v_rel / inv_sum;
-			sa->s.velocity = vec3_sub(sa->s.velocity, vec3_mulf(n, j * inv_a));
-			sb->s.velocity = vec3_add(sb->s.velocity, vec3_mulf(n, j * inv_b));
+			vec3_t dv_a = vec3_mulf(n, -j * inv_a);
+			vec3_t dv_b = vec3_mulf(n, j * inv_b);
+			sa->s.velocity = vec3_add(sa->s.velocity, dv_a);
+			sb->s.velocity = vec3_add(sb->s.velocity, dv_b);
+			ship_hit_spin(sa, n, dv_a);
+			ship_hit_spin(sb, vec3_mulf(n, -1), dv_b);
 
 			vec3_t hit_point = vec3_add(sa->s.position, vec3_mulf(n, sa->params.radius));
-			ship_damage(w, a, sa, sa->params.ship_damage * -v_rel, hit_point);
-			ship_damage(w, b, sb, sb->params.ship_damage * -v_rel, hit_point);
+			ship_damage(w, a, sa, sa->params.ship_damage * (-v_rel - sa->params.ship_damage_min), hit_point);
+			ship_damage(w, b, sb, sb->params.ship_damage * (-v_rel - sb->params.ship_damage_min), hit_point);
 
 			if (-v_rel > 1.0f * w->meter && sa->ship_event_cooldown <= 0 && sb->ship_event_cooldown <= 0) {
 				sa->ship_event_cooldown = sb->ship_event_cooldown = 0.15f;
@@ -1522,11 +1598,24 @@ static void ships_update_ranks(ag_world_t *w) {
 
 // AI ---------------------------------------------------------------------------
 
+static float route_ahead(ag_world_t *w, float from, float to) {
+	float d = to - from;
+	if (w->desc.route_closed) {
+		d = fmodf(d, w->route_length);
+		if (d < -w->route_length * 0.5f) d += w->route_length;
+		if (d > w->route_length * 0.5f) d -= w->route_length;
+	}
+	return d;
+}
+
 static void ship_ai_input(ag_world_t *w, int id, ship_t *sh, float dt, ag_input_t *in) {
 	ag_ship_state_t *s = &sh->s;
 	ag_ship_params_t *p = &sh->params;
 	ag_ai_params_t *ai = &sh->ai;
 	float m = w->meter;
+	float skill = clampf(ai->skill, 0, 1);
+	float tricks = clampf(ai->tricks, 0, 1);
+	float aggression = clampf(ai->aggression, 0, 1);
 	*in = (ag_input_t){0};
 	sh->ai_thrust_scale = ai->speed_scale;
 
@@ -1553,6 +1642,70 @@ static void ship_ai_input(ag_world_t *w, int id, ship_t *sh, float dt, ag_input_
 	float r_width;
 	ag_route_sample(w, progress, &r_pos, &r_dir, &r_up, &r_width);
 	float half_width = r_width * 0.5f;
+	float max_lateral = maxf(0, half_width - p->half_extents.x * 2.5f);
+	float my_lateral = s->lateral_offset * w->hand;
+	float clear = p->radius * 2.6f;
+
+	// Speed plan: the slowest corner within braking distance limits us.
+	// Skilled drivers lean on the airbrakes for rotation and corner faster.
+	float steer_rate = p->turn_rate;
+	float brake_rate = p->airbrake_yaw * (0.25f + 0.45f * skill);
+	float steer_falloff = steer_rate * (1 - p->turn_rate_at_top_speed) / p->top_speed;
+	float brake_decel = (p->airbrake_drag + p->thrust_accel * p->drag_linear_share / p->top_speed) * p->top_speed * 0.4f;
+	float margin = 0.75f + 0.15f * skill;
+	float step = 10 * m;
+	float horizon = minf(maxf(60 * m, speed * speed / (2 * brake_decel) + 40 * m), 400 * m);
+	// Crests: going over faster than the magnet can hold means flying off
+	// (and maybe over the walls). Never slower than crest_floor, so real
+	// jumps still get taken at speed.
+	float magnet = s->maglocked ? p->maglock_magnet : p->magnet;
+	float crest_floor = p->top_speed * 0.7f;
+
+	float target_speed = INFINITY;
+	vec3_t dir_a = r_dir;
+	vec3_t pos_a, pos_b;
+	ag_route_sample(w, progress, &pos_a, NULL, NULL, NULL);
+	ag_route_sample(w, progress + step, &pos_b, NULL, NULL, NULL);
+	for (float d = step; d <= horizon; d += step) {
+		vec3_t dir_b, up_b, pos_c;
+		ag_route_sample(w, progress + d, NULL, &dir_b, &up_b, NULL);
+		ag_route_sample(w, progress + d + step, &pos_c, NULL, NULL, NULL);
+		float curvature = fabsf(vec3_signed_angle(dir_a, dir_b, up_b)) / step;
+		dir_a = dir_b;
+
+		float allowed_at = INFINITY;
+		if (curvature > 1e-5f) {
+			allowed_at = (steer_rate + brake_rate) / (curvature + steer_falloff) * margin;
+		}
+
+		vec3_t v1 = vec3_sub(pos_b, pos_a), v2 = vec3_sub(pos_c, pos_b);
+		float l1 = vec3_len(v1), l2 = vec3_len(v2);
+
+		// The smoothed directions blur tight S-bends; the raw positions don't
+		vec3_t h1 = vec3_on_plane(v1, up_b), h2 = vec3_on_plane(v2, up_b);
+		if (vec3_len(h1) > 1e-3f && vec3_len(h2) > 1e-3f) {
+			float raw = fabsf(vec3_signed_angle(h1, h2, up_b)) / step;
+			if (raw > curvature) {
+				curvature = raw;
+				allowed_at = (steer_rate + brake_rate) / (curvature + steer_falloff) * margin;
+			}
+		}
+
+		if (l1 > 1e-3f && l2 > 1e-3f) {
+			float crest = (vec3_dot(v1, up_b) / l1 - vec3_dot(v2, up_b) / l2) / step;
+			if (crest > 1e-5f) {
+				allowed_at = minf(allowed_at, maxf(sqrtf(magnet / crest) * margin, crest_floor));
+			}
+		}
+		pos_a = pos_b;
+		pos_b = pos_c;
+
+		if (allowed_at < INFINITY) {
+			float allowed = sqrtf(allowed_at * allowed_at + 2 * brake_decel * maxf(d - step, 0));
+			target_speed = minf(target_speed, allowed);
+		}
+	}
+	bool straight = target_speed > speed * 1.15f;
 
 	// Lateral target: preferred offset plus cutting into upcoming corners
 	vec3_t dir_near, dir_far;
@@ -1566,75 +1719,156 @@ static void ship_ai_input(ag_world_t *w, int id, ship_t *sh, float dt, ag_input_
 	}
 	float lateral = ai->line_offset * 0.5f * half_width + cut;
 
-	// Move aside for slower craft ahead
-	float my_lateral = s->lateral_offset * w->hand;
+	// Hunt boost pads other craft have found
+	if (tricks > 0) {
+		float best = INFINITY;
+		float reach = 10 * m + speed * (0.5f + 0.7f * tricks);
+		for (int i = 0; i < w->pads_len; i++) {
+			float ahead = route_ahead(w, progress, w->pads[i].progress);
+			float shift = fabsf(w->pads[i].lateral - my_lateral);
+			if (ahead > 8 * m && ahead < reach && ahead < best && shift < ahead * 0.25f && fabsf(w->pads[i].lateral) <= max_lateral + p->half_extents.x) {
+				best = ahead;
+				lateral = lerpf(lateral, w->pads[i].lateral, tricks);
+			}
+		}
+	}
+
+	// Traffic: draft and overtake craft ahead, keep clear of craft alongside,
+	// block craft trying to pass
+	int shift_dir = 0; // Internal side sign
+	bool battle = false; // Someone to pass or hold off
 	for (int b = 0; b < AG_MAX_SHIPS; b++) {
 		ship_t *o = &w->ships[b];
-		if (b == id || !o->active) {
+		if (b == id || !o->active || o->s.out_of_bounds) {
 			continue;
 		}
 		float ahead = o->s.total_progress - s->total_progress;
-		bool alongside = fabsf(ahead) < (p->half_extents.z + o->params.half_extents.z) * 1.2f;
-		bool slower_ahead = ahead > 0 && ahead < 30 * m && o->s.speed < speed;
-		if (!alongside && !slower_ahead) {
-			continue;
-		}
 		float o_lateral = o->s.lateral_offset * w->hand;
 		float gap = my_lateral - o_lateral;
-		float clear = (p->radius + o->params.radius) * 1.3f;
-		if (fabsf(gap) < clear) {
-			float away = (gap >= 0 ? 1 : -1);
-			if (fabsf(o_lateral + away * clear) > half_width - p->half_extents.x) {
-				away = -away; // No room on that side
+		float away = gap >= 0 ? 1 : -1;
+		if (fabsf(o_lateral + away * clear) > max_lateral + p->half_extents.x) {
+			away = -away; // No room on that side
+		}
+		bool alongside = fabsf(ahead) < (p->half_extents.z + o->params.half_extents.z) * 1.2f;
+
+		if (fabsf(ahead) < 60 * m) {
+			battle = true;
+		}
+
+		if (ahead > 0 && ahead < p->draft_length * 0.9f && straight && tricks > 0 && o->s.speed > speed * 0.9f) {
+			if (ahead > 18 * m) {
+				lateral = lerpf(lateral, o_lateral, tricks * 0.8f); // Tuck into the slipstream
 			}
-			lateral = o_lateral + away * clear;
+			else {
+				lateral = o_lateral + away * clear; // Slingshot past
+				if (fabsf(gap) < clear * 0.8f && tricks > 0.3f) {
+					shift_dir = (int)away;
+				}
+			}
+		}
+		else if (alongside || (ahead > 0 && ahead < 30 * m && o->s.speed < speed)) {
+			if (fabsf(gap) < clear) {
+				lateral = o_lateral + away * clear;
+				float closing = speed - o->s.speed;
+				if (!alongside && ahead < 12 * m && closing > 10 * m && tricks > 0.2f) {
+					shift_dir = (int)away; // Dodge
+				}
+			}
+		}
+		else if (ahead < 0 && ahead > -25 * m && o->s.speed > speed + 2 * m && aggression > 0) {
+			lateral = lerpf(lateral, o_lateral, aggression * 0.6f); // Block
 		}
 	}
-	float max_lateral = maxf(0, half_width - p->half_extents.x * 2.5f);
 	lateral = clampf(lateral, -max_lateral, max_lateral);
-	sh->ai_lateral = approachf(sh->ai_lateral, lateral, 6 * m * dt);
+	sh->ai_lateral = approachf(sh->ai_lateral, lateral, 8 * m * dt);
 
-	// Steer towards a look-ahead point
-	// Shorten the look-ahead in tight bends so it doesn't cut across them
+	// Steer towards a look-ahead point; shorter in tight bends so it doesn't
+	// cut across them
 	float look_ahead = 12 * m + 0.35f * speed;
 	vec3_t t_pos, t_dir, t_up;
 	ag_route_sample(w, progress + look_ahead, NULL, &t_dir, NULL, NULL);
 	float bend = fabsf(vec3_signed_angle(r_dir, t_dir, r_up));
 	look_ahead = maxf(look_ahead / (1 + bend), 10 * m);
 	ag_route_sample(w, progress + look_ahead, &t_pos, &t_dir, &t_up, NULL);
-	t_pos = vec3_add(t_pos, vec3_mulf(vec3_cross(t_up, t_dir), sh->ai_lateral));
+
+	// Aim past the target lateral to cancel sideways drift relative to the
+	// route, so the craft doesn't carry momentum into the far wall
+	float lateral_speed = vec3_dot(s->velocity, vec3_cross(r_up, r_dir));
+	float predicted = my_lateral + lateral_speed * 0.35f;
+	float aim = sh->ai_lateral + clampf((sh->ai_lateral - predicted) * 0.6f, -half_width, half_width);
+	t_pos = vec3_add(t_pos, vec3_mulf(vec3_cross(t_up, t_dir), aim));
 
 	vec3_t n = s->grounded ? s->ground_normal : s->up;
 	vec3_t fwd = vec3_normalize_or(vec3_on_plane(s->forward, n), s->forward);
-	vec3_t to_target = vec3_on_plane(vec3_sub(t_pos, s->position), n);
-	float angle = vec3_signed_angle(fwd, vec3_normalize_or(to_target, fwd), n);
+	vec3_t to_target = vec3_normalize_or(vec3_on_plane(vec3_sub(t_pos, s->position), n), fwd);
+	float angle = vec3_signed_angle(fwd, to_target, n);
 
 	// Steer by where we're actually going, so sliding doesn't cause overshoot
 	vec3_t travel = vec3_on_plane(s->velocity, n);
 	vec3_t travel_dir = vec3_len(travel) > 0.1f * p->top_speed ? vec3_normalize_or(travel, fwd) : fwd;
-	float travel_angle = vec3_signed_angle(travel_dir, vec3_normalize_or(to_target, fwd), n);
-	float steer = clampf(travel_angle * (2.0f + ai->skill) - sh->yaw_rate * 0.25f, -1, 1);
+	float travel_angle = vec3_signed_angle(travel_dir, to_target, n);
+	float steer = clampf(travel_angle * (2.0f + skill) - sh->yaw_rate * 0.25f, -1, 1);
 
-	// Speed plan: the slowest corner within braking distance limits us
-	float wl = p->turn_rate + p->airbrake_yaw * 0.25f;
-	float turn_falloff = wl * (1 - p->turn_rate_at_top_speed) / p->top_speed;
-	float brake_decel = (p->airbrake_drag + p->thrust_accel * p->drag_linear_share / p->top_speed) * p->top_speed * 0.4f;
-	float margin = 0.75f + 0.15f * clampf(ai->skill, 0, 1);
-	float step = 10 * m;
-	float horizon = minf(maxf(60 * m, speed * speed / (2 * brake_decel) + 40 * m), 400 * m);
-	float target_speed = INFINITY;
-	vec3_t dir_a = r_dir;
-	for (float d = step; d <= horizon; d += step) {
-		vec3_t dir_b, up_b;
-		ag_route_sample(w, progress + d, NULL, &dir_b, &up_b, NULL);
-		float curvature = fabsf(vec3_signed_angle(dir_a, dir_b, up_b)) / step;
-		dir_a = dir_b;
-		if (curvature < 1e-5f) {
-			continue;
+	// Throttle off just above the target speed, both airbrakes when well above it
+	float over = target_speed < INFINITY ? (speed - target_speed) / target_speed : -1;
+	in->thrust = clampf(1 - (over + 0.02f) * 25, 0, 1);
+	float slow_down = clampf((over - 0.03f) * 8, 0, 1);
+
+	// Inside airbrake when the bend needs more rotation than steering gives,
+	// or when way off the heading
+	vec3_t dir_turn;
+	float turn_dist = maxf(15 * m, speed * 0.25f);
+	ag_route_sample(w, progress + turn_dist, NULL, &dir_turn, NULL, NULL);
+	float yaw_needed = speed * fabsf(vec3_signed_angle(r_dir, dir_turn, r_up)) / turn_dist;
+	float steer_cap = steer_rate * (1 - (1 - p->turn_rate_at_top_speed) * minf(speed / p->top_speed, 1));
+	float rotate = clampf((yaw_needed * 1.1f - steer_cap * 0.9f) / maxf(p->airbrake_yaw, 1e-3f), 0, 1) * (0.5f + 0.5f * skill);
+	float turn_in = clampf((fabsf(angle) - 0.3f) * 2, 0, 1);
+	float inside = maxf(rotate, turn_in);
+	float brake_side = slow_down, brake_other = slow_down;
+	if (steer > 0) {
+		brake_side = maxf(brake_side, inside);
+	}
+	else {
+		brake_other = maxf(brake_other, inside);
+	}
+
+	// Energy reserve: tricks that cost energy (or risk contact) need a margin,
+	// since only the host can recharge it (pickups, pit lanes)
+	float reserve = w->desc.use_energy ? s->energy / maxf(p->energy_max, 1e-3f) : 1;
+
+	// Sideshift: one step of input starts a tap
+	if (shift_dir != 0 && s->grounded && reserve > 0.4f) {
+		in->sideshift = shift_dir * (int)w->hand;
+	}
+
+	// Barrel roll when the jump is long enough to finish it
+	bool energy_ok = !w->desc.use_energy || (reserve > 0.7f && s->energy > p->barrel_roll_cost);
+	if (!s->grounded && tricks > 0.3f && sh->roll_dir == 0 && energy_ok) {
+		ag_hit_t hit;
+		vec3_t down = vec3_mulf(w->gravity_up, -1);
+		float g = vec3_len(w->desc.gravity);
+		if (g > 0 && world_raycast(w, s->position, down, 300 * m, &hit)) {
+			float h = maxf(hit.distance - p->hover_height, 0);
+			float vz = vec3_dot(s->velocity, w->gravity_up);
+			float t_land = (vz + sqrtf(vz * vz + 2 * g * h)) / g;
+			in->barrel_roll = t_land > p->barrel_roll_time * 1.25f;
 		}
-		float corner_speed = wl / (curvature + turn_falloff) * margin;
-		float allowed = sqrtf(corner_speed * corner_speed + 2 * brake_decel * maxf(d - step, 0));
-		target_speed = minf(target_speed, allowed);
+	}
+
+	// Hyperthrust on straights to win a battle, while the shield can spare it
+	if (w->desc.use_energy && tricks > 0.5f) {
+		sh->ai_hyperthrust_cooldown -= dt;
+		if (
+			!sh->ai_hyperthrust && sh->ai_hyperthrust_cooldown <= 0 && battle && straight &&
+			speed > p->top_speed * 0.9f && reserve > 0.9f - 0.15f * aggression
+		) {
+			sh->ai_hyperthrust = true;
+		}
+		if (sh->ai_hyperthrust && (!straight || reserve < 0.75f)) {
+			sh->ai_hyperthrust = false;
+			sh->ai_hyperthrust_cooldown = 20;
+		}
+		in->hyperthrust = sh->ai_hyperthrust;
 	}
 
 	// Rubber banding against the leading human
@@ -1649,20 +1883,6 @@ static void ship_ai_input(ag_world_t *w, int id, ship_t *sh, float dt, ag_input_
 			float behind = clampf((leader - s->total_progress) / (150 * m), -1, 1);
 			sh->ai_thrust_scale *= 1 + ai->catchup * behind;
 		}
-	}
-
-	// Throttle off just above the target speed, both airbrakes when well
-	// above it, and the inside airbrake when way off the heading
-	float over = target_speed < INFINITY ? (speed - target_speed) / target_speed : -1;
-	in->thrust = clampf(1 - (over + 0.02f) * 25, 0, 1);
-	float slow_down = clampf((over - 0.03f) * 8, 0, 1);
-	float turn_in = clampf((fabsf(angle) - 0.3f) * 2, 0, 1);
-	float brake_side = slow_down, brake_other = slow_down;
-	if (steer > 0) {
-		brake_side = maxf(brake_side, turn_in);
-	}
-	else {
-		brake_other = maxf(brake_other, turn_in);
 	}
 
 	in->steer = steer * w->hand;
@@ -1939,6 +2159,42 @@ void ag_ship_set_locked(ag_world_t *w, ag_ship_id_t id, bool locked) {
 	}
 }
 
+static bool route_has_ground(ag_world_t *w, ship_t *sh, float progress, float lateral) {
+	vec3_t pos, dir, up;
+	ag_route_sample(w, progress, &pos, &dir, &up, NULL);
+	pos = vec3_add(pos, vec3_mulf(vec3_cross(up, dir), lateral));
+	float reach = sh->params.half_extents.z * 3;
+	ag_hit_t hit;
+	return world_raycast(w, vec3_add(pos, vec3_mulf(up, reach)), vec3_mulf(up, -1), reach * 2, &hit) &&
+		!hit_is_wall(&hit, up) && !(hit.surface_flags & AG_SURFACE_KILL);
+}
+
+// Like a rescue drone: if there's a gap right ahead of the last valid
+// position (a missed jump), put the craft down on the far side of it
+static float route_respawn_progress(ag_world_t *w, ship_t *sh, float from, float lateral) {
+	float m = w->meter;
+	float step = 5 * m;
+	float d = 0;
+	bool gap = false;
+	for (; d <= 60 * m; d += step) {
+		if (!route_has_ground(w, sh, from + d, lateral)) {
+			gap = true;
+			break;
+		}
+	}
+	if (!gap) {
+		return from;
+	}
+	float solid = 0;
+	for (; d <= 400 * m; d += step) {
+		solid = route_has_ground(w, sh, from + d, lateral) ? solid + step : 0;
+		if (solid >= 20 * m) {
+			return route_wrap(w, from + d);
+		}
+	}
+	return from;
+}
+
 void ag_ship_respawn(ag_world_t *w, ag_ship_id_t id) {
 	ship_t *sh = get_ship(w, id);
 	if (!sh || !w->route) {
@@ -1947,10 +2203,12 @@ void ag_ship_respawn(ag_world_t *w, ag_ship_id_t id) {
 	float width;
 	ag_route_sample(w, sh->last_valid_progress, NULL, NULL, NULL, &width);
 	float lateral = clampf(sh->last_valid_lateral, -width * 0.25f, width * 0.25f);
-	float speed = 0.25f * sh->params.top_speed;
+	float speed = w->desc.respawn_speed * sh->params.top_speed;
+	float progress = route_respawn_progress(w, sh, sh->last_valid_progress, lateral);
 
 	int lap = sh->s.lap;
-	ship_place_on_route(w, sh, sh->last_valid_progress, lateral, speed);
+	ship_place_on_route(w, sh, progress, lateral, speed);
+	sh->last_valid_progress = sh->s.route_progress;
 	sh->s.lap = lap;
 	sh->s.total_progress = w->desc.route_closed
 		? (lap - 1) * w->route_length + sh->s.route_progress
@@ -2010,4 +2268,28 @@ float ag_ship_add_energy(ag_world_t *w, ag_ship_id_t id, float amount) {
 		event_push(w, AG_EVENT_ENERGY_DEPLETED, id, AG_INVALID_SHIP, 0, 0, s->position, s->up, 0);
 	}
 	return s->energy;
+}
+
+ag_ship_id_t ag_ship_find_target(ag_world_t *w, ag_ship_id_t id, float max_distance, float max_angle) {
+	ship_t *sh = get_ship(w, id);
+	if (!sh) {
+		return AG_INVALID_SHIP;
+	}
+	float min_cos = cosf(max_angle);
+	float best = max_distance;
+	ag_ship_id_t target = AG_INVALID_SHIP;
+	for (int i = 0; i < AG_MAX_SHIPS; i++) {
+		ship_t *o = &w->ships[i];
+		if (i == id || !o->active || o->s.out_of_bounds) {
+			continue;
+		}
+		vec3_t d = vec3_sub(o->s.position, sh->s.position);
+		float dist = vec3_len(d);
+		if (dist < 1e-3f || dist >= best || vec3_dot(d, sh->s.forward) < dist * min_cos) {
+			continue;
+		}
+		best = dist;
+		target = i;
+	}
+	return target;
 }

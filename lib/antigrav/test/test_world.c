@@ -151,8 +151,24 @@ void test_world_make_circuit(test_world_t *tw, bool with_walls) {
 	vec3_t *up = malloc(sizeof(vec3_t) * n);
 	vec3_t *side = malloc(sizeof(vec3_t) * n);
 
+	const int gap_start = (int)(0.30f * n);
+	const int gap_len = 6;
+	const int ramp_len = 10;
+	const int boost_a = (int)(0.06f * n);
+	const int boost_b = (int)(0.56f * n);
+	const int boost_len = 4;
+	const int landing_len = 150;
+
 	for (int i = 0; i < n; i++) {
 		c[i] = circuit_center((float)i / n);
+
+		// A kicker ramp before the jump and a landing 10m below the lip
+		if (in_range(i, gap_start - ramp_len, ramp_len + gap_len)) {
+			c[i].y += 4.0f * fminf((float)(i - (gap_start - ramp_len)) / ramp_len, 1);
+		}
+		else if (in_range(i, gap_start + gap_len, landing_len)) {
+			c[i].y -= 10.0f * (1 - (float)(i - gap_start - gap_len) / landing_len);
+		}
 	}
 
 	// Bank into the turns: tilt up towards the center of curvature
@@ -175,13 +191,6 @@ void test_world_make_circuit(test_world_t *tw, bool with_walls) {
 		side[i] = norm(cross(u, t));
 	}
 
-	const int gap_start = (int)(0.30f * n);
-	const int gap_len = 6;
-	const int ramp_len = 10;
-	const int boost_a = (int)(0.06f * n);
-	const int boost_b = (int)(0.56f * n);
-	const int boost_len = 4;
-
 	for (int i = 0; i < n; i++) {
 		int j = (i + 1) % n;
 		vec3_t li = add(c[i], mulf(side[i], CIRCUIT_HALF_WIDTH));
@@ -196,7 +205,10 @@ void test_world_make_circuit(test_world_t *tw, bool with_walls) {
 			if (in_range(i, boost_a, boost_len) || in_range(i, boost_b, boost_len)) {
 				left_flags |= AG_SURFACE_BOOST;
 			}
-			test_world_add_quad(tw, li, c[i], c[j], lj, up[i], left_flags);
+			// Boost pads cover only the outer half of the left lane
+			vec3_t mi = add(mulf(li, 0.5f), mulf(c[i], 0.5f)), mj = add(mulf(lj, 0.5f), mulf(c[j], 0.5f));
+			test_world_add_quad(tw, li, mi, mj, lj, up[i], left_flags);
+			test_world_add_quad(tw, mi, c[i], c[j], mj, up[i], floor_flags);
 			test_world_add_quad(tw, c[i], ri, rj, c[j], up[i], floor_flags);
 		}
 

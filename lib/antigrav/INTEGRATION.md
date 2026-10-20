@@ -141,6 +141,7 @@ From the host's material or collision flags, set:
 | `AG_SURFACE_NO_MAGNET` | The last few meters before a jump lip |
 | `AG_SURFACE_KILL` | Water, lava, death pits, out of map volumes with geometry |
 | `AG_SURFACE_MAGLOCK` | Mag-strips: loops, vertical drops, wall rides |
+| `AG_SURFACE_PIT` | Pit lane (recharges energy) |
 
 Everything else needs no flag: walkable ground is ground, steep geometry is
 a wall.
@@ -156,9 +157,12 @@ ag_ship_id_t id = ag_ship_add(world, &params, pos, forward);
 ag_ship_place_on_grid(world, id, slot);   // slot 0 = pole
 ```
 
-AI craft: `ag_ship_set_ai(world, id, &ai)` after `ag_ai_params_default(&ai)`.
+AI craft: `ag_ship_set_ai(world, id, &ai)` after
+`ag_ai_params_difficulty(&ai, AG_AI_EXPERT)` (or NOVICE / PILOT / ELITE).
 Give each AI a slightly different `skill`, `speed_scale` and `line_offset` so
-they don't drive in a line.
+they don't drive in a line. AI drivers don't fire weapons; the host's weapon
+logic can use `ag_ship_find_target()` to pick a lock and `state->energy` to
+decide between firing and absorbing a pickup.
 
 Collision sizes are in `params.radius` (craft vs. craft) and
 `params.half_extents` (walls). Match them to the host's vehicle model.
@@ -206,8 +210,10 @@ speed, lap, lap times, rank, wrong way, boost and grounded state.
 3. On GO: `ag_ship_set_locked(world, id, false)` for all
 4. `AG_EVENT_LAP`: a lap is complete when `state->lap` goes up; with N laps,
    a craft has finished when `state->lap > N`
-5. Out of bounds respawns automatically (`desc.auto_respawn`), or handle
-   `AG_EVENT_OUT_OF_BOUNDS` and call `ag_ship_respawn()` yourself
+5. Out of bounds respawns automatically after `desc.respawn_delay` (1.5 s) at
+   `desc.respawn_speed` (0 = standing start), past the gap if a jump was
+   missed. Or turn off `desc.auto_respawn`, handle `AG_EVENT_OUT_OF_BOUNDS` and
+   call `ag_ship_respawn()` yourself
 
 
 ## 9. Energy (optional)
@@ -259,5 +265,7 @@ ground ray hits under each craft, and wall hit events as markers.
 | `ag_ship_place_on_grid`, `ag_ship_teleport`, `ag_ship_set_locked`, `ag_ship_respawn` | Race flow |
 | `ag_ship_apply_impulse`, `ag_ship_apply_spin`, `ag_ship_boost`, `ag_ship_set_thrust_scale`, `ag_ship_add_energy` | Weapon and pickup effects |
 | `ag_ship_params_class` | Venom / Flash / Rapier / Phantom presets |
+| `ag_ai_params_difficulty` | Novice / Pilot / Expert / Elite AI presets |
+| `ag_ship_find_target` | Lock-on target for weapons |
 | `ag_route_resample`, `ag_route_length`, `ag_route_sample` | Route |
 | `ag_mesh_create`, `ag_mesh_raycast`, `ag_mesh_destroy` | Optional mesh collision |
