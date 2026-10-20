@@ -51,6 +51,7 @@ enum {
 	AG_SURFACE_BOOST     = 1 << 1, // Boost pad
 	AG_SURFACE_NO_MAGNET = 1 << 2, // Jump ramps: no downforce, the craft flies off the lip
 	AG_SURFACE_KILL      = 1 << 3, // Out of bounds (pits, water); triggers a respawn
+	AG_SURFACE_MAGLOCK   = 1 << 4, // Mag-strip: locks the craft to the surface (loops, vertical drops)
 };
 
 typedef struct {
@@ -105,6 +106,12 @@ typedef struct {
 	bool auto_respawn;
 	float respawn_delay;     // Seconds; default 1.0
 
+	// Optional shield energy: wall and craft hits drain it, barrel rolls cost
+	// it and hyperthrust burns it. antigrav only reports AG_EVENT_ENERGY_DEPLETED;
+	// what happens then (explosion, elimination, respawn) is up to the host.
+	// When off, barrel rolls are free and hyperthrust is unavailable.
+	bool use_energy;
+
 	// Optional allocator; malloc/free when NULL
 	void *(*alloc)(size_t size, void *user);
 	void (*free)(void *ptr, void *user);
@@ -154,6 +161,40 @@ typedef struct {
 	float airbrake_yaw;        // Extra yaw rate at full airbrake (rad/s)
 	float airbrake_drag;       // Drag at full airbrake, both sides (1/s)
 	float airbrake_grip;       // Grip multiplier when drifting (airbrake + steer same side)
+	float airbrake_turn_drag;  // Drag from a single airbrake (1/s); turning barely costs speed
+	float airbrake_gain;       // How fast airbrakes deploy (1/s); quick taps barely act
+	float airbrake_falloff;    // How fast they retract (1/s)
+
+	// Sideshift: double tap an airbrake (or ag_input_t.sideshift) to dart sideways
+	float sideshift_speed;     // Sideways speed while shifting
+	float sideshift_time;      // Duration of a tap
+	float sideshift_max_time;  // Duration when the second tap is held
+	float sideshift_cooldown;
+	float double_tap_window;   // Max seconds between the two taps
+
+	// Barrel roll: steer left-right-left or right-left-right while airborne
+	// (or ag_input_t.barrel_roll). Completing the roll before landing boosts.
+	float barrel_roll_time;    // Seconds for a full roll
+	float barrel_roll_cost;    // Energy, paid even if the roll fails
+	float barrel_roll_boost_accel;
+	float barrel_roll_boost_time;
+	float gesture_window;      // Max seconds for the steering gesture
+
+	// Nose down (pitch input) on descents gains speed
+	float dive_slope_bonus;    // Extra share of the downhill pull at full nose down
+
+	// Mag-strips (AG_SURFACE_MAGLOCK)
+	float maglock_magnet;      // Downforce; must exceed speed^2 / radius of convex sections
+	float maglock_grip;        // Grip multiplier (less drift)
+
+	// Energy (ag_world_desc_t.use_energy)
+	float energy_max;
+	float wall_damage;         // Energy per unit of impact speed above wall_damage_min
+	float wall_damage_min;     // Impact speed that's free (scraping along a wall)
+	float ship_damage;         // Energy per unit of impact speed, craft vs. craft
+	float hyperthrust_accel;
+	float hyperthrust_drain;   // Energy per second
+	float hyperthrust_min;     // Cuts out below this fraction of energy_max
 
 	// Hover
 	float hover_height;        // Target height above the surface
@@ -201,6 +242,16 @@ typedef struct {
 
 void ag_ship_params_default(ag_ship_params_t *params, float units_per_meter);
 
+// Speed class presets after the later WipEout games. The defaults are Flash.
+typedef enum {
+	AG_CLASS_VENOM,            // ~420 km/h
+	AG_CLASS_FLASH,            // ~520 km/h
+	AG_CLASS_RAPIER,           // ~660 km/h
+	AG_CLASS_PHANTOM,          // ~790 km/h
+} ag_speed_class_t;
+
+void ag_ship_params_class(ag_ship_params_t *params, ag_speed_class_t speed_class, float units_per_meter);
+
 
 // AI ---------------------------------------------------------------------------
 
@@ -226,6 +277,9 @@ typedef struct {
 	float thrust;              // 0..1
 	float airbrake_left;       // 0..1
 	float airbrake_right;      // 0..1
+	int sideshift;             // Hold -1 (left) or 1 (right) to sideshift; alternative to double tapping an airbrake
+	bool barrel_roll;          // Start a barrel roll while airborne; alternative to the steering gesture
+	bool hyperthrust;          // Burn energy for speed (requires use_energy)
 } ag_input_t;
 
 typedef struct {
@@ -244,6 +298,11 @@ typedef struct {
 	float draft;               // 0..1 slipstream strength
 	float stall_time;
 	float bank;                // Visual bank angle
+	bool maglocked;            // On a mag-strip
+	float sideshift_time;      // > 0 while sideshifting
+	float barrel_roll;         // Roll progress 0..1 while rolling, 0 otherwise
+	bool hyperthrusting;
+	float energy;              // 0..energy_max (stays at energy_max without use_energy)
 
 	// Race
 	bool locked;               // Held at the start line
@@ -296,6 +355,10 @@ void ag_ship_apply_spin(ag_world_t *world, ag_ship_id_t ship, float delta_yaw_ra
 void ag_ship_boost(ag_world_t *world, ag_ship_id_t ship, float accel, float duration);
 void ag_ship_set_thrust_scale(ag_world_t *world, ag_ship_id_t ship, float scale);   // e.g. 0.5 while hit by an EMP
 
+// Add (or with a negative amount, remove) shield energy, e.g. for absorbed
+// pickups or weapon damage. Clamped to 0..energy_max; returns the new energy.
+float ag_ship_add_energy(ag_world_t *world, ag_ship_id_t ship, float amount);
+
 
 // Route ------------------------------------------------------------------------
 
@@ -324,6 +387,11 @@ typedef enum {
 	AG_EVENT_WRONG_WAY,        // value: 1 when it starts, 0 when it ends
 	AG_EVENT_OUT_OF_BOUNDS,
 	AG_EVENT_RESPAWNED,
+	AG_EVENT_SIDESHIFT,        // value: -1 left, 1 right
+	AG_EVENT_BARREL_ROLL_START,
+	AG_EVENT_BARREL_ROLL,      // On landing; value: 1 = completed (boost), 0 = failed
+	AG_EVENT_DAMAGE,           // intensity: energy lost (only hits costing >= 1)
+	AG_EVENT_ENERGY_DEPLETED,
 } ag_event_type_t;
 
 typedef struct {

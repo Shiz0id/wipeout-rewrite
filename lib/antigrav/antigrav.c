@@ -98,6 +98,23 @@ typedef struct {
 	vec3_t prev_position, prev_forward, prev_up;
 	float prev_bank;
 
+	// Sideshift & barrel roll gestures
+	bool left_was_down, right_was_down;
+	float left_tap_time, right_tap_time;
+	int prev_sideshift_input;
+	bool prev_barrel_roll_input;
+	int sideshift_dir;          // Internal side sign
+	int sideshift_source;       // 0 = ag_input_t.sideshift, -1/1 = left/right airbrake
+	float sideshift_elapsed;
+	float sideshift_cooldown;
+	int last_flick;
+	int flicks;
+	float first_flick_time;
+	float brake_left, brake_right; // Deployed airbrakes, 0..1
+	float roll_dir;             // Internal side sign; 0 when not rolling
+	float roll_angle, prev_roll_angle;
+	bool energy_depleted;
+
 	// AI
 	bool is_ai;
 	ag_ai_params_t ai;
@@ -466,6 +483,34 @@ void ag_ship_params_default(ag_ship_params_t *p, float m) {
 		.airbrake_yaw = 0.9f,
 		.airbrake_drag = 0.35f,
 		.airbrake_grip = 0.35f,
+		.airbrake_turn_drag = 0.04f,
+		.airbrake_gain = 6.0f,
+		.airbrake_falloff = 10.0f,
+
+		.sideshift_speed = 16.0f * m,
+		.sideshift_time = 0.2f,
+		.sideshift_max_time = 0.4f,
+		.sideshift_cooldown = 0.5f,
+		.double_tap_window = 0.25f,
+
+		.barrel_roll_time = 0.55f,
+		.barrel_roll_cost = 10.0f,
+		.barrel_roll_boost_accel = 60.0f * m,
+		.barrel_roll_boost_time = 0.8f,
+		.gesture_window = 0.5f,
+
+		.dive_slope_bonus = 1.0f,
+
+		.maglock_magnet = 600.0f * m,
+		.maglock_grip = 2.0f,
+
+		.energy_max = 100.0f,
+		.wall_damage = 0.35f / m,
+		.wall_damage_min = 3.0f * m,
+		.ship_damage = 0.15f / m,
+		.hyperthrust_accel = 30.0f * m,
+		.hyperthrust_drain = 25.0f,
+		.hyperthrust_min = 0.25f,
 
 		.hover_height = 1.2f * m,
 		.hover_stiffness = 140.0f,
@@ -503,6 +548,30 @@ void ag_ship_params_default(ag_ship_params_t *p, float m) {
 		.bank_max = 0.5f,
 		.bank_rate = 6.0f,
 	};
+}
+
+void ag_ship_params_class(ag_ship_params_t *p, ag_speed_class_t speed_class, float m) {
+	static const float top_speed_kmh[] = {420, 522, 657, 793};
+	ag_ship_params_default(p, m);
+	int c = speed_class < AG_CLASS_VENOM ? AG_CLASS_VENOM : (speed_class > AG_CLASS_PHANTOM ? AG_CLASS_PHANTOM : speed_class);
+
+	// Speeds and accelerations scale with the class; steering with its square
+	// root (faster classes lean on the airbrakes more); downforce with its
+	// square, since crests and mag-strips need speed^2 / radius
+	float k = top_speed_kmh[c] / 3.6f * m / p->top_speed;
+	float k_sqrt = sqrtf(k);
+	p->top_speed *= k;
+	p->thrust_accel *= k;
+	p->boost_pad_accel *= k;
+	p->boost_pad_kick *= k;
+	p->barrel_roll_boost_accel *= k;
+	p->hyperthrust_accel *= k;
+	p->sideshift_speed *= k_sqrt;
+	p->turn_rate *= k_sqrt;
+	p->turn_accel *= k_sqrt;
+	p->airbrake_yaw *= k_sqrt;
+	p->magnet *= k * k;
+	p->maglock_magnet *= k * k;
 }
 
 void ag_ai_params_default(ag_ai_params_t *ai) {
@@ -684,6 +753,21 @@ static ground_t ship_probe_ground(ag_world_t *w, ship_t *sh) {
 	return g;
 }
 
+static void ship_damage(ag_world_t *w, int id, ship_t *sh, float amount, vec3_t pos) {
+	ag_ship_state_t *s = &sh->s;
+	if (!w->desc.use_energy || amount <= 0) {
+		return;
+	}
+	s->energy = maxf(s->energy - amount, 0);
+	if (amount >= 1) {
+		event_push(w, AG_EVENT_DAMAGE, id, AG_INVALID_SHIP, amount, s->energy, pos, s->up, 0);
+	}
+	if (s->energy <= 0 && !sh->energy_depleted) {
+		sh->energy_depleted = true;
+		event_push(w, AG_EVENT_ENERGY_DEPLETED, id, AG_INVALID_SHIP, 0, 0, pos, s->up, 0);
+	}
+}
+
 static void ship_wall_response(ag_world_t *w, int id, ship_t *sh, vec3_t wall_normal, vec3_t plane_n, ag_hit_t *hit) {
 	ag_ship_params_t *p = &sh->params;
 	vec3_t v = sh->s.velocity;
@@ -694,6 +778,7 @@ static void ship_wall_response(ag_world_t *w, int id, ship_t *sh, vec3_t wall_no
 
 	float speed = vec3_len(v);
 	float sin_a = speed > 1e-4f ? clampf(-vn / speed, 0, 1) : 1;
+	ship_damage(w, id, sh, p->wall_damage * (-vn - p->wall_damage_min), hit->position);
 
 	// Remove (and bounce) the velocity into the wall
 	v = vec3_sub(v, vec3_mulf(wall_normal, vn * (1 + p->wall_restitution)));
@@ -829,7 +914,80 @@ static void ship_step(ag_world_t *w, int id, ship_t *sh, float dt) {
 	in.airbrake_right = clampf(in.airbrake_right, 0, 1);
 	if (s->locked) {
 		in.steer = in.pitch = in.airbrake_left = in.airbrake_right = 0;
+		in.sideshift = 0;
+		in.barrel_roll = in.hyperthrust = false;
 	}
+
+	// Sideshift requests: a double tap on an airbrake, or the explicit input
+	float now = w->time;
+	int shift_request = 0, shift_source = 0;
+	bool left_down = in.airbrake_left > 0.5f, right_down = in.airbrake_right > 0.5f;
+	if (left_down && !sh->left_was_down) {
+		if (now - sh->left_tap_time < p->double_tap_window) {
+			shift_request = shift_source = -1;
+			sh->left_tap_time = -1e9f;
+		}
+		else {
+			sh->left_tap_time = now;
+		}
+	}
+	if (right_down && !sh->right_was_down) {
+		if (now - sh->right_tap_time < p->double_tap_window) {
+			shift_request = shift_source = 1;
+			sh->right_tap_time = -1e9f;
+		}
+		else {
+			sh->right_tap_time = now;
+		}
+	}
+	sh->left_was_down = left_down;
+	sh->right_was_down = right_down;
+
+	int shift_input = in.sideshift > 0 ? 1 : (in.sideshift < 0 ? -1 : 0);
+	if (shift_input != 0 && shift_input != sh->prev_sideshift_input) {
+		shift_request = shift_input;
+		shift_source = 0;
+	}
+	sh->prev_sideshift_input = shift_input;
+
+	bool roll_request = in.barrel_roll && !sh->prev_barrel_roll_input;
+	sh->prev_barrel_roll_input = in.barrel_roll;
+
+	if (sh->sideshift_cooldown > 0) {
+		sh->sideshift_cooldown -= dt;
+	}
+	if (shift_request && s->sideshift_time <= 0 && sh->sideshift_cooldown <= 0 && sh->was_grounded) {
+		sh->sideshift_dir = shift_request * (int)w->hand;
+		sh->sideshift_source = shift_source;
+		sh->sideshift_elapsed = 0;
+		s->sideshift_time = p->sideshift_max_time;
+		event_push(w, AG_EVENT_SIDESHIFT, id, AG_INVALID_SHIP, 0, (float)shift_request, s->position, s->up, 0);
+	}
+	if (s->sideshift_time > 0) {
+		// A tap shifts for sideshift_time; holding the second tap goes further
+		sh->sideshift_elapsed += dt;
+		int user_dir = sh->sideshift_dir * (int)w->hand;
+		bool held = sh->sideshift_source == 0
+			? shift_input == user_dir
+			: (sh->sideshift_source < 0 ? left_down : right_down);
+		if (sh->sideshift_elapsed >= p->sideshift_max_time || (sh->sideshift_elapsed >= p->sideshift_time && !held)) {
+			s->sideshift_time = 0;
+			sh->sideshift_cooldown = p->sideshift_cooldown;
+		}
+		else {
+			s->sideshift_time = p->sideshift_max_time - sh->sideshift_elapsed;
+		}
+	}
+	// Airbrakes deploy over time, so the taps of a sideshift barely act
+	float brake_l = in.airbrake_left, brake_r = in.airbrake_right;
+	if (s->sideshift_time > 0) {
+		brake_l = brake_r = 0;
+		sh->brake_left = sh->brake_right = 0;
+	}
+	sh->brake_left = approachf(sh->brake_left, brake_l, (brake_l > sh->brake_left ? p->airbrake_gain : p->airbrake_falloff) * dt);
+	sh->brake_right = approachf(sh->brake_right, brake_r, (brake_r > sh->brake_right ? p->airbrake_gain : p->airbrake_falloff) * dt);
+	in.airbrake_left = sh->brake_left;
+	in.airbrake_right = sh->brake_right;
 
 	// Engine
 	float spool = in.thrust > s->engine ? p->spool_up : p->spool_down;
@@ -856,7 +1014,20 @@ static void ship_step(ag_world_t *w, int id, ship_t *sh, float dt) {
 	float brake_side = w->hand > 0 ? in.airbrake_right : in.airbrake_left;
 	float brake_other = w->hand > 0 ? in.airbrake_left : in.airbrake_right;
 	float steer = in.steer * w->hand;
-	float brakes = (in.airbrake_left + in.airbrake_right) * 0.5f;
+
+	// Both airbrakes brake; a single one mostly turns and costs little speed
+	float both_brakes = minf(in.airbrake_left, in.airbrake_right);
+	float brake_drag = p->airbrake_drag * both_brakes +
+		p->airbrake_turn_drag * (in.airbrake_left + in.airbrake_right - 2 * both_brakes);
+
+	// Hyperthrust burns energy for speed
+	float hyper_accel = 0;
+	s->hyperthrusting = false;
+	if (w->desc.use_energy && in.hyperthrust && s->energy > p->hyperthrust_min * p->energy_max) {
+		hyper_accel = p->hyperthrust_accel;
+		s->energy = maxf(s->energy - p->hyperthrust_drain * dt, 0);
+		s->hyperthrusting = true;
+	}
 
 	float top = p->top_speed;
 	float c_lin = p->thrust_accel * p->drag_linear_share / top;
@@ -878,16 +1049,42 @@ static void ship_step(ag_world_t *w, int id, ship_t *sh, float dt) {
 				event_push(w, AG_EVENT_LANDED, id, AG_INVALID_SHIP, -vn, 0, s->position, n, g.material);
 			}
 			s->air_time = 0;
+
+			// A barrel roll pays off only if it was completed before landing
+			if (sh->roll_dir != 0) {
+				bool clean = s->barrel_roll >= 1;
+				if (clean) {
+					s->boost_time = maxf(s->boost_time, p->barrel_roll_boost_time);
+					sh->boost_accel = p->barrel_roll_boost_accel;
+					sh->roll_angle = 0;
+					sh->prev_roll_angle -= 2 * (float)M_PI * sh->roll_dir; // Same orientation, no unwinding
+				}
+				else {
+					sh->roll_angle = remainderf(sh->roll_angle, 2 * (float)M_PI);
+				}
+				event_push(w, AG_EVENT_BARREL_ROLL, id, AG_INVALID_SHIP, 0, clean ? 1 : 0, s->position, n, g.material);
+				sh->roll_dir = 0;
+				s->barrel_roll = 0;
+			}
 		}
+		sh->flicks = 0;
+		sh->last_flick = 0;
+
+		bool maglock = (g.flags & AG_SURFACE_MAGLOCK) != 0;
+		s->maglocked = maglock;
 
 		// Hover spring; downforce is capped by the magnet, or by plain gravity
 		// on jump ramps so the craft flies off the lip
 		float k = p->hover_stiffness;
 		float c = 2.0f * p->hover_damping * sqrtf(k);
 		float accel_n = k * (p->hover_height - g.height) - c * vn;
-		float min_accel = (g.flags & AG_SURFACE_NO_MAGNET)
-			? -fabsf(vec3_dot(w->desc.gravity, n))
-			: -p->magnet;
+		float min_accel = -p->magnet;
+		if (maglock) {
+			min_accel = -p->maglock_magnet;
+		}
+		else if (g.flags & AG_SURFACE_NO_MAGNET) {
+			min_accel = -fabsf(vec3_dot(w->desc.gravity, n));
+		}
 		accel_n = maxf(accel_n, min_accel);
 		vn += accel_n * dt;
 
@@ -905,7 +1102,7 @@ static void ship_step(ag_world_t *w, int id, ship_t *sh, float dt) {
 		vec3_t fwd = vec3_normalize_or(vec3_on_plane(s->forward, n), s->forward);
 		float speed = vec3_len(vt);
 		float drift = (steer > 0 ? brake_side : (steer < 0 ? brake_other : 0)) * fabsf(steer);
-		float grip = p->grip * lerpf(1, p->airbrake_grip, drift);
+		float grip = p->grip * lerpf(1, p->airbrake_grip, drift) * (maglock ? p->maglock_grip : 1);
 		if (speed > 1e-3f) {
 			vec3_t dir = vec3_mulf(vt, 1.0f / speed);
 			vec3_t side = vec3_cross(n, fwd);
@@ -929,20 +1126,26 @@ static void ship_step(ag_world_t *w, int id, ship_t *sh, float dt) {
 			sh->on_boost_pad = false;
 		}
 
-		// Thrust, boost and hills
-		vec3_t accel = vec3_mulf(fwd, p->thrust_accel * s->engine * thrust_scale);
+		// Thrust, boost and hills; mag-strips cancel the hills
+		vec3_t accel = vec3_mulf(fwd, p->thrust_accel * s->engine * thrust_scale + hyper_accel);
 		if (s->boost_time > 0) {
 			accel = vec3_add(accel, vec3_mulf(fwd, sh->boost_accel));
 		}
 		float gravity_mag = vec3_len(w->desc.gravity);
-		if (gravity_mag > 1e-6f) {
-			vec3_t slope = vec3_on_plane(w->desc.gravity, n);
-			accel = vec3_add(accel, vec3_mulf(slope, p->track_gravity / gravity_mag * p->slope_gravity));
+		if (gravity_mag > 1e-6f && !maglock) {
+			vec3_t slope = vec3_mulf(vec3_on_plane(w->desc.gravity, n), p->track_gravity / gravity_mag * p->slope_gravity);
+			accel = vec3_add(accel, slope);
+
+			// Nose down on descents to pick up more speed
+			float downhill = vec3_dot(slope, fwd);
+			if (downhill > 0 && in.pitch < 0) {
+				accel = vec3_add(accel, vec3_mulf(fwd, downhill * p->dive_slope_bonus * -in.pitch));
+			}
 		}
 
 		// Drag, integrated implicitly so it can't overshoot
 		float drag_mult = lerpf(p->coast_drag, 1, s->engine) * (1 - s->draft * p->draft_drag_reduction);
-		float drag = (c_lin + c_quad * speed) * drag_mult + p->airbrake_drag * brakes;
+		float drag = (c_lin + c_quad * speed) * drag_mult + brake_drag;
 		vt = vec3_mulf(vec3_add(vt, vec3_mulf(accel, dt)), 1.0f / (1 + drag * dt));
 
 		if (s->locked) {
@@ -959,6 +1162,39 @@ static void ship_step(ag_world_t *w, int id, ship_t *sh, float dt) {
 		yaw_axis = s->up;
 		s->air_time += dt;
 		sh->on_boost_pad = false;
+		s->maglocked = false;
+
+		// Barrel roll: steering left-right-left (or right-left-right) quickly
+		if (sh->roll_dir == 0) {
+			int flick = in.steer > 0.6f ? 1 : (in.steer < -0.6f ? -1 : 0);
+			int roll_user_dir = in.steer < 0 ? -1 : 1;
+			if (flick != 0 && flick != sh->last_flick) {
+				if (sh->flicks == 0 || now - sh->first_flick_time > p->gesture_window) {
+					sh->flicks = 0;
+					sh->first_flick_time = now;
+				}
+				sh->flicks++;
+				sh->last_flick = flick;
+				if (sh->flicks >= 3) {
+					roll_request = true;
+					roll_user_dir = flick;
+				}
+			}
+			bool affordable = !w->desc.use_energy || s->energy >= p->barrel_roll_cost;
+			if (roll_request && affordable) {
+				if (w->desc.use_energy) {
+					s->energy -= p->barrel_roll_cost;
+				}
+				sh->roll_dir = (float)(roll_user_dir * (int)w->hand);
+				sh->flicks = 0;
+				s->barrel_roll = 1e-4f;
+				event_push(w, AG_EVENT_BARREL_ROLL_START, id, AG_INVALID_SHIP, 0, (float)roll_user_dir, s->position, s->up, 0);
+			}
+		}
+		if (sh->roll_dir != 0) {
+			s->barrel_roll = minf(s->barrel_roll + dt / p->barrel_roll_time, 1);
+			sh->roll_angle = s->barrel_roll * 2 * (float)M_PI * sh->roll_dir;
+		}
 
 		// Limited air control over the horizontal flight direction
 		vec3_t vh = vec3_on_plane(s->velocity, gup);
@@ -970,12 +1206,12 @@ static void ship_step(ag_world_t *w, int id, ship_t *sh, float dt) {
 			s->velocity = vec3_add(vec3_mulf(dir, speed_h), vec3_mulf(gup, vec3_dot(s->velocity, gup)));
 		}
 
-		vec3_t accel = vec3_add(w->desc.gravity, vec3_mulf(s->forward, p->thrust_accel * s->engine * thrust_scale));
+		vec3_t accel = vec3_add(w->desc.gravity, vec3_mulf(s->forward, p->thrust_accel * s->engine * thrust_scale + hyper_accel));
 		if (s->boost_time > 0) {
 			accel = vec3_add(accel, vec3_mulf(s->forward, sh->boost_accel));
 		}
 		float speed = vec3_len(s->velocity);
-		float drag = ((c_lin + c_quad * speed) + p->airbrake_drag * brakes) * p->air_drag;
+		float drag = ((c_lin + c_quad * speed) + brake_drag) * p->air_drag;
 		s->velocity = vec3_mulf(vec3_add(s->velocity, vec3_mulf(accel, dt)), 1.0f / (1 + drag * dt));
 
 		s->ground_normal = gup;
@@ -1036,8 +1272,17 @@ static void ship_step(ag_world_t *w, int id, ship_t *sh, float dt) {
 	float bank_target = clampf(sh->yaw_rate / p->turn_rate, -1, 1) * p->bank_max;
 	s->bank = lerpf(s->bank, bank_target, blend(p->bank_rate, dt));
 
-	// Integrate
+	if (sh->roll_dir == 0) {
+		sh->roll_angle *= 1 - blend(10, dt); // Settle after a failed roll
+	}
+
+	// Integrate; sideshifts move the craft without touching its velocity
 	s->position = vec3_add(s->position, vec3_mulf(s->velocity, dt));
+	if (s->sideshift_time > 0) {
+		vec3_t fwd_plane = vec3_normalize_or(vec3_on_plane(s->forward, plane_n), s->forward);
+		vec3_t side = vec3_cross(plane_n, fwd_plane);
+		s->position = vec3_add(s->position, vec3_mulf(side, sh->sideshift_dir * p->sideshift_speed * dt));
+	}
 	ship_collide_walls(w, id, sh, prev_position, plane_n);
 
 	sh->was_grounded = g.grounded;
@@ -1085,6 +1330,10 @@ static void ships_collide(ag_world_t *w) {
 			float j = -(1 + 0.35f) * v_rel / inv_sum;
 			sa->s.velocity = vec3_sub(sa->s.velocity, vec3_mulf(n, j * inv_a));
 			sb->s.velocity = vec3_add(sb->s.velocity, vec3_mulf(n, j * inv_b));
+
+			vec3_t hit_point = vec3_add(sa->s.position, vec3_mulf(n, sa->params.radius));
+			ship_damage(w, a, sa, sa->params.ship_damage * -v_rel, hit_point);
+			ship_damage(w, b, sb, sb->params.ship_damage * -v_rel, hit_point);
 
 			if (-v_rel > 1.0f * w->meter && sa->ship_event_cooldown <= 0 && sb->ship_event_cooldown <= 0) {
 				sa->ship_event_cooldown = sb->ship_event_cooldown = 0.15f;
@@ -1432,6 +1681,7 @@ static void world_substep(ag_world_t *w, float dt) {
 			sh->prev_forward = sh->s.forward;
 			sh->prev_up = sh->s.up;
 			sh->prev_bank = sh->s.bank;
+			sh->prev_roll_angle = sh->roll_angle;
 		}
 	}
 
@@ -1490,6 +1740,10 @@ static void ship_reset_motion(ship_t *sh) {
 	sh->prev_forward = sh->s.forward;
 	sh->prev_up = sh->s.up;
 	sh->prev_bank = sh->s.bank = 0;
+	sh->roll_dir = 0;
+	sh->roll_angle = sh->prev_roll_angle = 0;
+	sh->s.barrel_roll = 0;
+	sh->s.sideshift_time = 0;
 }
 
 ag_ship_id_t ag_ship_add(ag_world_t *w, const ag_ship_params_t *params, vec3_t position, vec3_t forward) {
@@ -1504,6 +1758,8 @@ ag_ship_id_t ag_ship_add(ag_world_t *w, const ag_ship_params_t *params, vec3_t p
 		sh->thrust_scale = 1;
 		sh->ai_thrust_scale = 1;
 		sh->route_seg = -1;
+		sh->left_tap_time = sh->right_tap_time = -1e9f;
+		sh->s.energy = params->energy_max;
 		ag_ship_teleport(w, i, position, forward);
 		return i;
 	}
@@ -1521,6 +1777,7 @@ void ag_ship_set_params(ag_world_t *w, ag_ship_id_t id, const ag_ship_params_t *
 	ship_t *sh = get_ship(w, id);
 	if (sh) {
 		sh->params = *params;
+		sh->s.energy = minf(sh->s.energy, params->energy_max);
 	}
 }
 
@@ -1558,7 +1815,7 @@ void ag_ship_get_pose(ag_world_t *w, ag_ship_id_t id, ag_pose_t *pose) {
 	vec3_t fwd = vec3_normalize_or(vec3_lerp(sh->prev_forward, sh->s.forward, t), sh->s.forward);
 	vec3_t up = vec3_normalize_or(vec3_lerp(sh->prev_up, sh->s.up, t), sh->s.up);
 	up = vec3_normalize_or(vec3_on_plane(up, fwd), sh->s.up);
-	float bank = lerpf(sh->prev_bank, sh->s.bank, t);
+	float bank = lerpf(sh->prev_bank, sh->s.bank, t) + lerpf(sh->prev_roll_angle, sh->roll_angle, t);
 
 	// Positive bank tilts the up vector towards the side of the turn
 	up = vec3_rotate(up, fwd, -bank);
@@ -1736,4 +1993,21 @@ void ag_ship_set_thrust_scale(ag_world_t *w, ag_ship_id_t id, float scale) {
 	if (sh) {
 		sh->thrust_scale = maxf(scale, 0);
 	}
+}
+
+float ag_ship_add_energy(ag_world_t *w, ag_ship_id_t id, float amount) {
+	ship_t *sh = get_ship(w, id);
+	if (!sh) {
+		return 0;
+	}
+	ag_ship_state_t *s = &sh->s;
+	s->energy = clampf(s->energy + amount, 0, sh->params.energy_max);
+	if (s->energy > 0) {
+		sh->energy_depleted = false;
+	}
+	else if (!sh->energy_depleted) {
+		sh->energy_depleted = true;
+		event_push(w, AG_EVENT_ENERGY_DEPLETED, id, AG_INVALID_SHIP, 0, 0, s->position, s->up, 0);
+	}
+	return s->energy;
 }

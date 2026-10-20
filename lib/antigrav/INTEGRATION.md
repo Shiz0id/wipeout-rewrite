@@ -140,6 +140,7 @@ From the host's material or collision flags, set:
 | `AG_SURFACE_BOOST` | Boost pads (can be decals placed for the racing mode) |
 | `AG_SURFACE_NO_MAGNET` | The last few meters before a jump lip |
 | `AG_SURFACE_KILL` | Water, lava, death pits, out of map volumes with geometry |
+| `AG_SURFACE_MAGLOCK` | Mag-strips: loops, vertical drops, wall rides |
 
 Everything else needs no flag: walkable ground is ground, steep geometry is
 a wall.
@@ -172,7 +173,11 @@ ag_input_t in = {
 	.thrust = accelerate,             // 0..1
 	.airbrake_left = left_brake,      // 0..1
 	.airbrake_right = right_brake,    // 0..1
-	.pitch = stick_y,                 // nose up/down in the air
+	.pitch = stick_y,                 // nose up/down; nose down dives on descents
+	.sideshift = 0,                   // optional dedicated button: -1/1 while held
+	                                  // (double tapping an airbrake works anyway)
+	.barrel_roll = false,             // optional button; the steering gesture works anyway
+	.hyperthrust = boost_button,      // needs desc.use_energy
 };
 ag_ship_set_input(world, player, &in);
 
@@ -205,7 +210,19 @@ speed, lap, lap times, rank, wrong way, boost and grounded state.
    `AG_EVENT_OUT_OF_BOUNDS` and call `ag_ship_respawn()` yourself
 
 
-## 9. Weapons
+## 9. Energy (optional)
+
+Set `desc.use_energy` to let antigrav run the shield meter: wall and craft
+impacts drain it, barrel rolls cost it and hyperthrust burns it. Feed weapon
+damage, absorbed pickups and pit lanes in with `ag_ship_add_energy()`, and
+handle `AG_EVENT_ENERGY_DEPLETED` (antigrav keeps simulating the craft; the
+host decides whether it explodes, is eliminated or respawns).
+
+If the host already has its own health system, leave `use_energy` off and
+convert `AG_EVENT_WALL_HIT` / `AG_EVENT_SHIP_HIT` intensities into damage on
+the host side. Barrel rolls are then free and hyperthrust is unavailable.
+
+## 10. Weapons
 
 The host's weapons stay the host's. Apply their effects through:
 `ag_ship_apply_impulse`, `ag_ship_apply_spin`, `ag_ship_boost` and
@@ -213,7 +230,7 @@ The host's weapons stay the host's. Apply their effects through:
 `ag_ship_state()` to aim and to spawn projectiles. Examples are in README.md.
 
 
-## 10. Verify, in this order
+## 11. Verify, in this order
 
 | Step | Expect | If not |
 |---|---|---|
@@ -240,6 +257,7 @@ ground ray hits under each craft, and wall hit events as markers.
 | `ag_ship_set_input`, `ag_ship_set_ai`, `ag_ai_params_default` | Control |
 | `ag_ship_state`, `ag_ship_get_pose` | Read back |
 | `ag_ship_place_on_grid`, `ag_ship_teleport`, `ag_ship_set_locked`, `ag_ship_respawn` | Race flow |
-| `ag_ship_apply_impulse`, `ag_ship_apply_spin`, `ag_ship_boost`, `ag_ship_set_thrust_scale` | Weapon and pickup effects |
+| `ag_ship_apply_impulse`, `ag_ship_apply_spin`, `ag_ship_boost`, `ag_ship_set_thrust_scale`, `ag_ship_add_energy` | Weapon and pickup effects |
+| `ag_ship_params_class` | Venom / Flash / Rapier / Phantom presets |
 | `ag_route_resample`, `ag_route_length`, `ag_route_sample` | Route |
 | `ag_mesh_create`, `ag_mesh_raycast`, `ag_mesh_destroy` | Optional mesh collision |

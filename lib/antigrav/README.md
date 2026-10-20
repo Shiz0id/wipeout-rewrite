@@ -15,6 +15,10 @@ wipEout rewrite's craft code and rebuilt to run on any engine's geometry.
   boosting past top speed, slipstream drafting, start boost / stall
 - **Walls you can scrape**: grazing a wall costs almost nothing, a head-on hit
   costs everything; the nose turns along the wall instead of spinning out
+- **Later WipEout mechanics**: airbrakes that turn without bleeding speed,
+  sideshift (double tap an airbrake), barrel rolls for a boost, nose-down
+  diving, mag-strips for loops and vertical drops, optional shield energy with
+  wall damage and hyperthrust, and Venom/Flash/Rapier/Phantom speed classes
 - **AI drivers** on the same physics as the player, with speed planning, racing
   lines, overtaking and rubber banding
 - **Race logic**: laps, lap times, positions, wrong way detection, respawns
@@ -175,6 +179,7 @@ one core; feed it the geometry around the course rather than a whole map.
 | `AG_SURFACE_NO_MAGNET` | The last stretch before a jump: removes downforce so craft fly off the lip instead of following the ramp down |
 | `AG_SURFACE_KILL` | Water, pits, lava: out of bounds, then a respawn |
 | `AG_SURFACE_WALL` | Force wall behavior on shallow barriers, curbs or glass |
+| `AG_SURFACE_MAGLOCK` | Mag-strips: lock craft to loops, vertical drops and wall rides |
 
 `material` is passed through untouched in events, so wall hits and landings can
 pick the right sounds and sparks.
@@ -219,9 +224,35 @@ still work as usual.
 | `AG_EVENT_WRONG_WAY` | `value` 1 = starts, 0 = ends | HUD warning |
 | `AG_EVENT_OUT_OF_BOUNDS` | | Fade out, rescue drone |
 | `AG_EVENT_RESPAWNED` | | Fade in |
+| `AG_EVENT_SIDESHIFT` | `value` = -1 left / 1 right | Whoosh, side thruster fx |
+| `AG_EVENT_BARREL_ROLL_START` | | Roll sound |
+| `AG_EVENT_BARREL_ROLL` | `value` 1 = completed (boost), 0 = landed mid-roll | Boost fx or a failed-roll wobble |
+| `AG_EVENT_DAMAGE` | `intensity` = energy lost (hits costing >= 1) | Shield flash, HUD |
+| `AG_EVENT_ENERGY_DEPLETED` | | Explosion / elimination; antigrav keeps simulating the craft |
 
 The queue holds 256 events; poll it every frame.
 
+
+## Later WipEout mechanics
+
+The handling follows the WipEout 2097 → HD / 2048 lineage:
+
+| Mechanic | How to trigger | Notes |
+|---|---|---|
+| Airbrakes | `airbrake_left` / `airbrake_right` | One airbrake turns and barely costs speed (`airbrake_turn_drag`); both brake (`airbrake_drag`). They deploy and retract over time (`airbrake_gain`, `airbrake_falloff`). Airbrake plus steering on the same side drifts |
+| Sideshift | Double tap an airbrake, or hold `input.sideshift` at -1/1 | Darts sideways without turning; holding the second tap goes further. Ground only, with a cooldown |
+| Barrel roll | Steer left-right-left (or right-left-right) quickly while airborne, or `input.barrel_roll` | Costs `barrel_roll_cost` energy even if it fails; completing the roll before landing gives a boost. Not possible on mag-strips (they keep you grounded) |
+| Diving | `input.pitch` < 0 on descents | Gains extra speed downhill (`dive_slope_bonus`); in the air, pitch shortens or stretches jumps |
+| Mag-strips | `AG_SURFACE_MAGLOCK` on the geometry | Locks the craft to the surface (loops, vertical drops), cancels hills, reduces drift |
+| Shield energy | `desc.use_energy = true` | Wall and craft impacts drain it (scraping is free), barrel rolls cost it; the host adds or removes energy with `ag_ship_add_energy()` for pickups, absorbing weapons and weapon damage |
+| Hyperthrust | Hold `input.hyperthrust` (needs `use_energy`) | Burns energy for extra thrust until `hyperthrust_min` |
+| Speed classes | `ag_ship_params_class(&p, AG_CLASS_RAPIER, upm)` | Venom ~420, Flash ~520 (the defaults), Rapier ~660, Phantom ~790 km/h; faster classes accelerate and turn harder |
+
+Measured with defaults: one airbrake for 2 s keeps 89% of top speed; both
+airbrakes take you from top speed to 50 m/s in 1.5 s; a sideshift tap moves
+~5 m, held ~6.5 m; a 10° wall graze costs 6 energy, a head-on hit at 120 m/s
+50; craft follow a mag-strip over a 90° edge at 100 m/s without leaving it.
+Zone mode (ever increasing speed) is a host-side `ag_ship_set_params()` ramp.
 
 ## Weapons and pickups
 
@@ -254,7 +285,7 @@ the test report with defaults:
 |---|---|
 | 0-100 m/s | 2.5 s |
 | Top speed | 145 m/s (522 km/h); ~190 m/s with boost pads and drafting |
-| Turn radius at top speed | 97 m full steer; 26 m drifting with the airbrake (losing half the speed) |
+| Turn radius at top speed | 97 m full steer; 32 m drifting with the airbrake (losing ~40% of the speed) |
 | Wall hit at 10° / 30° / 90° | keeps 97% / 73% / 8% of the speed |
 | AI average race speed | ~88% of top speed on the test circuit |
 
@@ -276,6 +307,9 @@ What to change for what you feel:
 | Bigger boosts | `boost_pad_accel`, `boost_pad_time`, `boost_pad_kick` |
 | Stronger slipstream | `draft_drag_reduction`, `draft_length` |
 | Jumps hang longer | lower `desc.gravity` |
+| Sideshift further / snappier | `sideshift_speed`, `sideshift_time`, `sideshift_max_time` |
+| Barrel rolls easier | lower `barrel_roll_time`, raise `gesture_window` |
+| Walls hurt more / less (energy) | `wall_damage`, `wall_damage_min` |
 
 Craft classes and teams are just different parameter sets, and
 `ag_ship_set_params()` can change them at any time (e.g. for upgrades).

@@ -41,6 +41,11 @@ bool test_world_raycast_brute(test_world_t *tw, ag_vec3_t origin, ag_vec3_t dir,
 // laid out across open terrain. Fills tw->route.
 void test_world_make_circuit(test_world_t *tw, bool with_walls);
 
+// A straight run over a 90 degree convex edge, down a 60m vertical drop and
+// through a concave curve onto the floor below. The curved and vertical
+// sections can be mag-strips. Runs along +z; fills tw->route.
+void test_world_make_drop(test_world_t *tw, bool maglock);
+
 // A large flat floor with an optional straight wall along z at x = wall_x
 // (facing +x)
 void test_world_make_flat(test_world_t *tw, bool with_wall, float wall_x);

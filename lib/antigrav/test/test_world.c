@@ -240,3 +240,55 @@ void test_world_make_flat(test_world_t *tw, bool with_wall, float wall_x) {
 	}
 	test_world_build(tw);
 }
+
+
+// Drop -------------------------------------------------------------------------
+
+typedef struct {
+	vec3_t pos, up;
+	uint32_t flags;
+} strip_point_t;
+
+void test_world_make_drop(test_world_t *tw, bool maglock) {
+	test_world_init(tw);
+	const float r = 25, half_width = 10;
+	const uint32_t mag = maglock ? AG_SURFACE_MAGLOCK : 0;
+	strip_point_t pts[1024];
+	int n = 0;
+
+	// Approach
+	for (float z = 0; z < 200; z += 5) {
+		pts[n++] = (strip_point_t){v3(0, 0, z), v3(0, 1, 0), 0};
+	}
+	// Convex edge into the drop
+	for (int i = 0; i <= 40; i++) {
+		float a = i / 40.0f * PI / 2;
+		pts[n++] = (strip_point_t){v3(0, -r + r * cosf(a), 200 + r * sinf(a)), v3(0, cosf(a), sinf(a)), mag};
+	}
+	// Vertical drop
+	for (float y = -r - 5; y > -r - 60; y -= 5) {
+		pts[n++] = (strip_point_t){v3(0, y, 200 + r), v3(0, 0, 1), mag};
+	}
+	// Concave curve onto the floor below
+	for (int i = 0; i <= 40; i++) {
+		float b = i / 40.0f * PI / 2;
+		pts[n++] = (strip_point_t){v3(0, -r - 60 - r * sinf(b), 200 + 2 * r - r * cosf(b)), v3(0, sinf(b), cosf(b)), mag};
+	}
+	// Run out
+	for (float z = 200 + 2 * r + 5; z < 700; z += 5) {
+		pts[n++] = (strip_point_t){v3(0, -2 * r - 60, z), v3(0, 1, 0), 0};
+	}
+
+	vec3_t x = v3(half_width, 0, 0);
+	for (int i = 0; i < n - 1; i++) {
+		strip_point_t *a = &pts[i], *b = &pts[i + 1];
+		test_world_add_quad(tw, sub(a->pos, x), add(a->pos, x), add(b->pos, x), sub(b->pos, x), a->up, a->flags & b->flags);
+	}
+
+	tw->route_len = n;
+	tw->route = malloc(sizeof(ag_route_point_t) * n);
+	for (int i = 0; i < n; i++) {
+		tw->route[i] = (ag_route_point_t){pts[i].pos, pts[i].up, half_width * 2};
+	}
+	test_world_build(tw);
+}
