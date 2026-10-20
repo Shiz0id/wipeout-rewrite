@@ -6,11 +6,11 @@ BUILD_DIR ?= build
 
 all: $(BUILD_DIR)/libantigrav.a
 
-$(BUILD_DIR)/antigrav.o: antigrav.c antigrav.h
+$(BUILD_DIR)/%.o: %.c antigrav.h antigrav_mesh.h
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c antigrav.c -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/libantigrav.a: $(BUILD_DIR)/antigrav.o
+$(BUILD_DIR)/libantigrav.a: $(BUILD_DIR)/antigrav.o $(BUILD_DIR)/antigrav_mesh.o
 	$(AR) rcs $@ $^
 
 $(BUILD_DIR)/sim_test: $(BUILD_DIR)/libantigrav.a test/sim_test.c test/test_world.c test/test_world.h

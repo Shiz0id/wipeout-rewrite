@@ -23,8 +23,7 @@ void test_world_init(test_world_t *tw) {
 
 void test_world_free(test_world_t *tw) {
 	free(tw->tris);
-	free(tw->cell_start);
-	free(tw->cell_items);
+	ag_mesh_destroy(tw->mesh);
 	free(tw->route);
 	memset(tw, 0, sizeof(*tw));
 }
@@ -46,61 +45,29 @@ void test_world_add_quad(test_world_t *tw, vec3_t a, vec3_t b, vec3_t c, vec3_t 
 	test_world_add_tri(tw, a, c, d, up_hint, flags);
 }
 
-static void tri_cell_range(test_world_t *tw, test_tri_t *t, int *x0, int *x1, int *z0, int *z1) {
-	float min_x = fminf(t->a.x, fminf(t->b.x, t->c.x));
-	float max_x = fmaxf(t->a.x, fmaxf(t->b.x, t->c.x));
-	float min_z = fminf(t->a.z, fminf(t->b.z, t->c.z));
-	float max_z = fmaxf(t->a.z, fmaxf(t->b.z, t->c.z));
-	*x0 = (int)((min_x - tw->min_x) / tw->cell_size);
-	*x1 = (int)((max_x - tw->min_x) / tw->cell_size);
-	*z0 = (int)((min_z - tw->min_z) / tw->cell_size);
-	*z1 = (int)((max_z - tw->min_z) / tw->cell_size);
-}
-
-void test_world_build_grid(test_world_t *tw, float cell_size) {
-	float min_x = INFINITY, min_z = INFINITY, max_x = -INFINITY, max_z = -INFINITY;
+void test_world_build(test_world_t *tw) {
+	float *positions = malloc(sizeof(float) * 9 * tw->tris_len);
+	uint32_t *flags = malloc(sizeof(uint32_t) * tw->tris_len);
+	uint32_t *materials = malloc(sizeof(uint32_t) * tw->tris_len);
 	for (int i = 0; i < tw->tris_len; i++) {
-		vec3_t p[3] = {tw->tris[i].a, tw->tris[i].b, tw->tris[i].c};
-		for (int k = 0; k < 3; k++) {
-			min_x = fminf(min_x, p[k].x); max_x = fmaxf(max_x, p[k].x);
-			min_z = fminf(min_z, p[k].z); max_z = fmaxf(max_z, p[k].z);
-		}
+		test_tri_t *t = &tw->tris[i];
+		float *p = &positions[i * 9];
+		p[0] = t->a.x; p[1] = t->a.y; p[2] = t->a.z;
+		p[3] = t->b.x; p[4] = t->b.y; p[5] = t->b.z;
+		p[6] = t->c.x; p[7] = t->c.y; p[8] = t->c.z;
+		flags[i] = t->flags;
+		materials[i] = (uint32_t)i;
 	}
-	tw->cell_size = cell_size;
-	tw->min_x = min_x;
-	tw->min_z = min_z;
-	tw->cells_x = (int)((max_x - min_x) / cell_size) + 1;
-	tw->cells_z = (int)((max_z - min_z) / cell_size) + 1;
-
-	int cells = tw->cells_x * tw->cells_z;
-	int *counts = calloc(cells + 1, sizeof(int));
-	for (int i = 0; i < tw->tris_len; i++) {
-		int x0, x1, z0, z1;
-		tri_cell_range(tw, &tw->tris[i], &x0, &x1, &z0, &z1);
-		for (int z = z0; z <= z1; z++) {
-			for (int x = x0; x <= x1; x++) {
-				counts[z * tw->cells_x + x]++;
-			}
-		}
-	}
-
-	tw->cell_start = calloc(cells + 1, sizeof(int));
-	for (int c = 0; c < cells; c++) {
-		tw->cell_start[c + 1] = tw->cell_start[c] + counts[c];
-	}
-	tw->cell_items = malloc(sizeof(int) * (tw->cell_start[cells] + 1));
-	memset(counts, 0, sizeof(int) * cells);
-	for (int i = 0; i < tw->tris_len; i++) {
-		int x0, x1, z0, z1;
-		tri_cell_range(tw, &tw->tris[i], &x0, &x1, &z0, &z1);
-		for (int z = z0; z <= z1; z++) {
-			for (int x = x0; x <= x1; x++) {
-				int c = z * tw->cells_x + x;
-				tw->cell_items[tw->cell_start[c] + counts[c]++] = i;
-			}
-		}
-	}
-	free(counts);
+	ag_mesh_part_t part = {
+		.positions = positions,
+		.vertex_count = tw->tris_len * 3,
+		.triangle_flags = flags,
+		.triangle_materials = materials,
+	};
+	tw->mesh = ag_mesh_create(&part, 1);
+	free(positions);
+	free(flags);
+	free(materials);
 }
 
 static bool ray_tri(vec3_t o, vec3_t d, test_tri_t *t, float *dist) {
@@ -128,36 +95,22 @@ static bool ray_tri(vec3_t o, vec3_t d, test_tri_t *t, float *dist) {
 
 bool test_world_raycast(void *user, vec3_t origin, vec3_t dir, float max_distance, ag_hit_t *hit) {
 	test_world_t *tw = user;
-	vec3_t end = add(origin, mulf(dir, max_distance));
+	return ag_mesh_raycast(tw->mesh, origin, dir, max_distance, hit);
+}
 
-	int x0 = (int)floorf((fminf(origin.x, end.x) - tw->min_x) / tw->cell_size);
-	int x1 = (int)floorf((fmaxf(origin.x, end.x) - tw->min_x) / tw->cell_size);
-	int z0 = (int)floorf((fminf(origin.z, end.z) - tw->min_z) / tw->cell_size);
-	int z1 = (int)floorf((fmaxf(origin.z, end.z) - tw->min_z) / tw->cell_size);
-	if (x0 < 0) x0 = 0;
-	if (z0 < 0) z0 = 0;
-	if (x1 >= tw->cells_x) x1 = tw->cells_x - 1;
-	if (z1 >= tw->cells_z) z1 = tw->cells_z - 1;
-
+bool test_world_raycast_brute(test_world_t *tw, vec3_t origin, vec3_t dir, float max_distance, ag_hit_t *hit) {
 	float best = max_distance;
 	int best_tri = -1;
-	for (int z = z0; z <= z1; z++) {
-		for (int x = x0; x <= x1; x++) {
-			int c = z * tw->cells_x + x;
-			for (int k = tw->cell_start[c]; k < tw->cell_start[c + 1]; k++) {
-				float dist;
-				int i = tw->cell_items[k];
-				if (ray_tri(origin, dir, &tw->tris[i], &dist) && dist < best) {
-					best = dist;
-					best_tri = i;
-				}
-			}
+	for (int i = 0; i < tw->tris_len; i++) {
+		float dist;
+		if (ray_tri(origin, dir, &tw->tris[i], &dist) && dist < best) {
+			best = dist;
+			best_tri = i;
 		}
 	}
 	if (best_tri < 0) {
 		return false;
 	}
-
 	test_tri_t *t = &tw->tris[best_tri];
 	hit->distance = best;
 	hit->position = add(origin, mulf(dir, best));
@@ -191,7 +144,7 @@ static bool in_range(int i, int start, int count) {
 	return i >= start && i < start + count;
 }
 
-void test_world_make_circuit(test_world_t *tw) {
+void test_world_make_circuit(test_world_t *tw, bool with_walls) {
 	test_world_init(tw);
 	const int n = CIRCUIT_SAMPLES;
 	vec3_t *c = malloc(sizeof(vec3_t) * n);
@@ -247,10 +200,12 @@ void test_world_make_circuit(test_world_t *tw) {
 			test_world_add_quad(tw, c[i], ri, rj, c[j], up[i], floor_flags);
 		}
 
-		vec3_t wall_i = mulf(up[i], CIRCUIT_WALL_HEIGHT);
-		vec3_t wall_j = mulf(up[j], CIRCUIT_WALL_HEIGHT);
-		test_world_add_quad(tw, li, lj, add(lj, wall_j), add(li, wall_i), mulf(side[i], -1), 0);
-		test_world_add_quad(tw, ri, rj, add(rj, wall_j), add(ri, wall_i), side[i], 0);
+		if (with_walls) {
+			vec3_t wall_i = mulf(up[i], CIRCUIT_WALL_HEIGHT);
+			vec3_t wall_j = mulf(up[j], CIRCUIT_WALL_HEIGHT);
+			test_world_add_quad(tw, li, lj, add(lj, wall_j), add(li, wall_i), mulf(side[i], -1), 0);
+			test_world_add_quad(tw, ri, rj, add(rj, wall_j), add(ri, wall_i), side[i], 0);
+		}
 	}
 
 	// Kill pit under the jump
@@ -273,7 +228,7 @@ void test_world_make_circuit(test_world_t *tw) {
 	free(c);
 	free(up);
 	free(side);
-	test_world_build_grid(tw, 16);
+	test_world_build(tw);
 }
 
 void test_world_make_flat(test_world_t *tw, bool with_wall, float wall_x) {
@@ -283,5 +238,5 @@ void test_world_make_flat(test_world_t *tw, bool with_wall, float wall_x) {
 	if (with_wall) {
 		test_world_add_quad(tw, v3(wall_x, 0, -s), v3(wall_x, 0, s), v3(wall_x, 6, s), v3(wall_x, 6, -s), v3(1, 0, 0), 0);
 	}
-	test_world_build_grid(tw, 250);
+	test_world_build(tw);
 }

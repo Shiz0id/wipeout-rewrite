@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(antigrav C)
 
-add_library(antigrav STATIC antigrav.c antigrav.h)
+add_library(antigrav STATIC antigrav.c antigrav.h antigrav_mesh.c antigrav_mesh.h)
 target_include_directories(antigrav PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(antigrav PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
 if(NOT MSVC)

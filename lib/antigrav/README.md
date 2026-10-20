@@ -5,7 +5,10 @@ wipEout rewrite's craft code and rebuilt to run on any engine's geometry.
 
 - **No dependencies** besides libm; two files: `antigrav.h`, `antigrav.c`
 - **Your geometry**: works on arbitrary map meshes through one raycast callback;
-  loops, banks, hills, jumps
+  loops, banks, hills, jumps. Optional `antigrav_mesh` provides a BVH raycaster
+  over triangle soups when the engine's own raycast isn't convenient
+- **Open maps**: invisible walls along the route edges keep craft on course
+  where the map has no barriers; sparse control points become a smooth route
 - **Fixed timestep** (120 Hz by default) with interpolated poses; results are
   identical at any frame rate
 - **Handling**: grip that keeps your speed through turns, airbrake drifting,
@@ -19,7 +22,8 @@ wipEout rewrite's craft code and rebuilt to run on any engine's geometry.
   queue for audio and effects
 
 The host engine keeps everything else: models, rendering, audio, weapons,
-pickups, UI and cameras.
+pickups, UI and cameras. See `INTEGRATION.md` for a step-by-step wiring and
+verification checklist.
 
 
 ## Building
@@ -28,11 +32,12 @@ Add the directory to your CMake project:
 
 ```cmake
 add_subdirectory(path/to/antigrav)
-target_link_libraries(selo PRIVATE antigrav)
+target_link_libraries(your_game PRIVATE antigrav)
 ```
 
-Or just compile `antigrav.c` as C (C99; MSVC 2019+ in C mode) with the rest of
-your sources. The header is C++ compatible.
+Or just compile `antigrav.c` (and optionally `antigrav_mesh.c`) as C (C99;
+MSVC 2019+ in C mode) with the rest of your sources. The headers are C++
+compatible.
 
 Tests: `make test` or `cmake -S . -B build && cmake --build build && ctest --test-dir build`.
 
@@ -42,22 +47,22 @@ Tests: `make test` or `cmake -S . -B build && cmake --build build && ctest --tes
 ```cpp
 #include "antigrav.h"
 
-// 1. Raycast against static map geometry (not the craft)
+// 1. Raycast against static map geometry (not the craft). host_* stands for
+//    whatever the engine provides.
 static bool raycast(void *user, ag_vec3_t origin, ag_vec3_t dir, float max_dist, ag_hit_t *hit) {
-	SeloWorld *world = (SeloWorld *)user;
-	SeloRayHit h;
-	if (!world->raycast(to_selo(origin), to_selo(dir), max_dist, LAYER_TRACK_COLLISION, &h)) {
+	host_ray_hit_t h;
+	if (!host_raycast_static(user, origin, dir, max_dist, &h)) {
 		return false;
 	}
-	hit->position = from_selo(h.point);
-	hit->normal = from_selo(h.normal);
+	hit->position = h.point;
+	hit->normal = h.normal;          // unit length, facing the ray origin
 	hit->distance = h.distance;
 	hit->material = h.material_id;
 	hit->surface_flags = 0;
-	if (h.material_flags & SELO_MAT_BOOST)  hit->surface_flags |= AG_SURFACE_BOOST;
-	if (h.material_flags & SELO_MAT_JUMP)   hit->surface_flags |= AG_SURFACE_NO_MAGNET;
-	if (h.material_flags & SELO_MAT_KILL)   hit->surface_flags |= AG_SURFACE_KILL;
-	if (h.material_flags & SELO_MAT_BARRIER) hit->surface_flags |= AG_SURFACE_WALL;
+	if (h.material_flags & HOST_MAT_BOOST)   hit->surface_flags |= AG_SURFACE_BOOST;
+	if (h.material_flags & HOST_MAT_JUMP)    hit->surface_flags |= AG_SURFACE_NO_MAGNET;
+	if (h.material_flags & HOST_MAT_KILL)    hit->surface_flags |= AG_SURFACE_KILL;
+	if (h.material_flags & HOST_MAT_BARRIER) hit->surface_flags |= AG_SURFACE_WALL;
 	return true;
 }
 
@@ -65,10 +70,11 @@ static bool raycast(void *user, ag_vec3_t origin, ag_vec3_t dir, float max_dist,
 ag_world_desc_t desc;
 ag_world_desc_default(&desc, UNITS_PER_METER);
 desc.raycast = raycast;
-desc.user = selo_world;
+desc.user = host_world;
 desc.route = route_points;      // copied
 desc.route_len = route_count;
 desc.route_closed = true;
+desc.route_walls = true;        // open map without barriers
 ag_world_t *world = ag_world_create(&desc);
 
 // 3. Add craft
@@ -116,7 +122,7 @@ for (each ship) {
 ```
 
 
-## Hooking up Selo maps
+## Hooking up maps
 
 ### Geometry
 
@@ -139,8 +145,27 @@ Rules for map geometry:
   (~2 m with defaults), or craft will float over them
 - Ground normals must face up out of the track; one-sided collision is fine
 - Large maps are fine: at 4 km from the origin float precision is still
-  sub-millimeter in meters. If Selo uses very small units (e.g. centimeters),
-  keep the map centered on the origin
+  sub-millimeter in meters. If the engine uses very small units (e.g.
+  centimeters), keep the map centered on the origin
+
+### Mesh collision (optional)
+
+`antigrav_mesh.h` builds a BVH over one or more triangle meshes (with
+optional transforms, per part or per triangle surface flags and materials)
+and provides `ag_mesh_raycast`, which plugs straight into `desc.raycast`:
+
+```c
+ag_mesh_part_t part = {
+	.positions = vertices, .vertex_count = vertex_count,
+	.indices = indices, .triangle_count = triangle_count,
+};
+ag_mesh_t *mesh = ag_mesh_create(&part, 1);
+desc.raycast = ag_mesh_raycast;
+desc.user = mesh;
+```
+
+About 80 bytes per triangle and roughly 2 million short rays per second on
+one core; feed it the geometry around the course rather than a whole map.
 
 ### Surface flags
 
@@ -156,8 +181,9 @@ pick the right sounds and sparks.
 
 ### The route
 
-The route is a polyline along the circuit that you author in Selo's editor (a
-spline you sample works best). antigrav uses it for laps, positions, wrong way
+The route is a polyline along the circuit, authored per map. You can place a
+few control points at the bends and let `ag_route_resample()` turn them into
+a smooth, evenly spaced route. antigrav uses it for laps, positions, wrong way
 detection, respawning and the AI. Physics works without it, but then there are
 no laps and no AI.
 
@@ -169,7 +195,15 @@ no laps and no AI.
 - Point 0 is the **start/finish line**; `ag_ship_place_on_grid()` lines craft up
   behind it in two columns
 - Branching tracks: route the main line; craft on a shortcut still get progress
-  from the nearest point
+  from the nearest point (don't combine shortcuts with `route_walls`)
+
+### Open maps
+
+Maps built for other games rarely have barriers along a race course. Set
+`desc.route_walls` and the route edges (`width / 2` from the route line)
+become invisible walls that behave like real ones: craft scrape along them,
+bounce off them and emit `AG_EVENT_WALL_HIT`. Real walls inside the corridor
+still work as usual.
 
 
 ## Events

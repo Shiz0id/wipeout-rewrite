@@ -94,6 +94,11 @@ typedef struct {
 	int route_len;
 	bool route_closed;       // Circuit (laps) vs. point-to-point
 
+	// For open maps without barriers: invisible walls along the route edges
+	// keep craft within the route width. They behave like real walls (events,
+	// scraping, bouncing).
+	bool route_walls;
+
 	// Respawn craft automatically after they went out of bounds or got stuck.
 	// If false, only AG_EVENT_OUT_OF_BOUNDS is emitted and the host calls
 	// ag_ship_respawn() itself. AI craft always respawn automatically.
@@ -295,6 +300,13 @@ void ag_ship_set_thrust_scale(ag_world_t *world, ag_ship_id_t ship, float scale)
 // Route ------------------------------------------------------------------------
 
 float ag_route_length(ag_world_t *world);
+
+// Turn a few hand placed control points into a smooth route (centripetal
+// Catmull-Rom spline) with a point every `spacing` world units; width and up
+// are interpolated. Writes at most out_capacity points to out and returns the
+// number of points the whole route needs, so call it with out = NULL first to
+// size the buffer. Returns 0 for fewer than 2 control points.
+int ag_route_resample(const ag_route_point_t *controls, int controls_len, bool closed, float spacing, ag_route_point_t *out, int out_capacity);
 // Sample the route at a distance along it. Any output may be NULL.
 void ag_route_sample(ag_world_t *world, float distance, ag_vec3_t *position, ag_vec3_t *direction, ag_vec3_t *up, float *width);
 

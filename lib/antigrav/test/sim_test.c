@@ -28,7 +28,7 @@ static bool vec_finite(ag_vec3_t a) {
 	return isfinite(a.x) && isfinite(a.y) && isfinite(a.z);
 }
 
-static ag_world_t *make_world(test_world_t *tw, bool with_route) {
+static ag_world_t *make_world_ex(test_world_t *tw, bool with_route, bool route_walls) {
 	ag_world_desc_t desc;
 	ag_world_desc_default(&desc, 1.0f);
 	desc.raycast = test_world_raycast;
@@ -37,8 +37,13 @@ static ag_world_t *make_world(test_world_t *tw, bool with_route) {
 		desc.route = tw->route;
 		desc.route_len = tw->route_len;
 		desc.route_closed = true;
+		desc.route_walls = route_walls;
 	}
 	return ag_world_create(&desc);
+}
+
+static ag_world_t *make_world(test_world_t *tw, bool with_route) {
+	return make_world_ex(tw, with_route, false);
 }
 
 
@@ -265,10 +270,10 @@ static float frame_dt(int mode, int frame) {
 	}
 }
 
-static void run_race(test_world_t *tw, int dt_mode, bool with_countdown, race_result_t *r) {
+static void run_race(test_world_t *tw, int dt_mode, bool with_countdown, bool route_walls, race_result_t *r) {
 	memset(r, 0, sizeof(*r));
 	r->finite = true;
-	ag_world_t *w = make_world(tw, true);
+	ag_world_t *w = make_world_ex(tw, true, route_walls);
 
 	ag_ship_params_t params;
 	ag_ship_params_default(&params, 1.0f);
@@ -357,7 +362,7 @@ static void run_race(test_world_t *tw, int dt_mode, bool with_countdown, race_re
 static void test_race(void) {
 	printf("\n== AI race: %d craft, %d laps on the test circuit ==\n", RACE_SHIPS, RACE_LAPS);
 	test_world_t tw;
-	test_world_make_circuit(&tw);
+	test_world_make_circuit(&tw, true);
 
 	ag_world_t *probe = make_world(&tw, true);
 	float min_radius = INFINITY;
@@ -377,7 +382,7 @@ static void test_race(void) {
 	const char *mode_names[] = {"30 fps", "60 fps", "144 fps", "jitter 4-40ms"};
 	race_result_t results[4];
 	for (int mode = 0; mode < 4; mode++) {
-		run_race(&tw, mode, true, &results[mode]);
+		run_race(&tw, mode, true, false, &results[mode]);
 	}
 
 	race_result_t *r = &results[1];
@@ -414,7 +419,7 @@ static void test_race(void) {
 	race_result_t exact[4];
 	bool identical = true;
 	for (int mode = 0; mode < 4; mode++) {
-		run_race(&tw, mode, false, &exact[mode]);
+		run_race(&tw, mode, false, false, &exact[mode]);
 	}
 	for (int mode = 0; mode < 4; mode++) {
 		for (int i = 0; i < RACE_SHIPS; i++) {
@@ -444,13 +449,177 @@ static void test_race(void) {
 }
 
 
+// Mesh -------------------------------------------------------------------------
+
+static unsigned rng_state = 12345;
+static float rnd(void) {
+	rng_state = rng_state * 1664525u + 1013904223u;
+	return (rng_state >> 8) / 16777216.0f;
+}
+
+static void test_mesh(void) {
+	printf("\n== Mesh collision: BVH vs. brute force ==\n");
+	test_world_t tw;
+	test_world_make_circuit(&tw, true);
+
+	int rays = 20000, hits = 0, mismatches = 0;
+	clock_t start = clock();
+	ag_hit_t hb[1];
+	for (int i = 0; i < rays; i++) {
+		ag_route_point_t *rp = &tw.route[(int)(rnd() * tw.route_len) % tw.route_len];
+		ag_vec3_t o = v3(rp->position.x + (rnd() - 0.5f) * 40, rp->position.y + rnd() * 10, rp->position.z + (rnd() - 0.5f) * 40);
+		ag_vec3_t d = v3(rnd() - 0.5f, rnd() - 0.7f, rnd() - 0.5f);
+		float l = len(d);
+		d = v3(d.x / l, d.y / l, d.z / l);
+
+		ag_hit_t ha;
+		bool a = ag_mesh_raycast(tw.mesh, o, d, 60, &ha);
+		bool b = test_world_raycast_brute(&tw, o, d, 60, hb);
+		hits += a;
+		if (a != b || (a && (fabsf(ha.distance - hb->distance) > 1e-3f || ha.surface_flags != hb->surface_flags))) {
+			mismatches++;
+		}
+	}
+	double brute_and_bvh = (double)(clock() - start) / CLOCKS_PER_SEC;
+
+	start = clock();
+	int bvh_rays = 1000000;
+	ag_hit_t h;
+	for (int i = 0; i < bvh_rays; i++) {
+		ag_route_point_t *rp = &tw.route[i % tw.route_len];
+		ag_vec3_t o = v3(rp->position.x, rp->position.y + 2, rp->position.z);
+		ag_mesh_raycast(tw.mesh, o, v3(0, -1, 0), 8, &h);
+	}
+	double bvh_time = (double)(clock() - start) / CLOCKS_PER_SEC;
+
+	printf("  %d triangles, %d random rays (%d hits): %d mismatches (%.2fs incl. brute force)\n",
+		ag_mesh_triangle_count(tw.mesh), rays, hits, mismatches, brute_and_bvh);
+	printf("  %.1f million short rays per second\n", bvh_rays / fmax(bvh_time, 1e-6) / 1e6);
+	CHECK(mismatches == 0, "%d BVH/brute force mismatches", mismatches);
+	CHECK(hits > rays / 4, "only %d of %d rays hit", hits, rays);
+	test_world_free(&tw);
+}
+
+
+// Route walls & resampling -----------------------------------------------------
+
+static void test_route_walls(void) {
+	printf("\n== Route walls on an open floor ==\n");
+	test_world_t tw;
+	test_world_make_flat(&tw, false, 0);
+	tw.route_len = 101;
+	tw.route = malloc(sizeof(ag_route_point_t) * tw.route_len);
+	for (int i = 0; i < tw.route_len; i++) {
+		tw.route[i] = (ag_route_point_t){v3(0, 0, i * 20.0f), v3(0, 0, 0), 20};
+	}
+
+	ag_world_desc_t desc;
+	ag_world_desc_default(&desc, 1);
+	desc.raycast = test_world_raycast;
+	desc.user = &tw;
+	desc.route = tw.route;
+	desc.route_len = tw.route_len;
+	desc.route_closed = false;
+	desc.route_walls = true;
+	ag_world_t *w = ag_world_create(&desc);
+
+	ag_ship_params_t params;
+	ag_ship_params_default(&params, 1);
+	float a = 30 * PI / 180;
+	ag_ship_id_t ship = ag_ship_add(w, &params, v3(0, 2, 50), v3(sinf(a), 0, cosf(a)));
+	ag_ship_apply_impulse(w, ship, v3(sinf(a) * 120, 0, cosf(a) * 120));
+	ag_input_t in = {.thrust = 1};
+	ag_ship_set_input(w, ship, &in);
+
+	float max_x = 0;
+	int wall_hits = 0;
+	for (int i = 0; i < 240; i++) {
+		ag_world_step(w, 1.0f / 60);
+		max_x = fmaxf(max_x, fabsf(ag_ship_state(w, ship)->position.x));
+		ag_event_t ev;
+		while (ag_world_poll_event(w, &ev)) {
+			wall_hits += ev.type == AG_EVENT_WALL_HIT;
+		}
+	}
+	const ag_ship_state_t *s = ag_ship_state(w, ship);
+	float limit = 10 - params.half_extents.x;
+	printf("  30 deg into the edge at 120 m/s: max |x| %.2f (limit %.2f), %d wall events, %.1f m/s after\n", max_x, limit, wall_hits, s->speed);
+	CHECK(max_x <= limit + 0.01f, "left the route width: %.2f", max_x);
+	CHECK(wall_hits >= 1, "no wall event");
+	CHECK(s->speed > 60, "lost too much speed against a route wall: %.1f", s->speed);
+
+	ag_world_destroy(w);
+	test_world_free(&tw);
+}
+
+static void test_resample(void) {
+	printf("\n== Route resampling ==\n");
+	ag_route_point_t controls[8];
+	for (int i = 0; i < 8; i++) {
+		float a = i * 2 * PI / 8;
+		controls[i] = (ag_route_point_t){v3(300 * cosf(a), 0, 300 * sinf(a)), v3(0, 0, 0), 20 + i};
+	}
+	int count = ag_route_resample(controls, 8, true, 10, NULL, 0);
+	ag_route_point_t *out = malloc(sizeof(ag_route_point_t) * count);
+	int written = ag_route_resample(controls, 8, true, 10, out, count);
+
+	float max_dev = 0, min_gap = INFINITY, max_gap = 0;
+	for (int i = 0; i < count; i++) {
+		ag_vec3_t p = out[i].position, q = out[(i + 1) % count].position;
+		max_dev = fmaxf(max_dev, fabsf(len(p) - 300));
+		float gap = len(v3(q.x - p.x, q.y - p.y, q.z - p.z));
+		min_gap = fminf(min_gap, gap);
+		max_gap = fmaxf(max_gap, gap);
+	}
+	printf("  8 points on a 300 m circle -> %d points (written %d), off the circle by <= %.2f m, spacing %.2f..%.2f m\n",
+		count, written, max_dev, min_gap, max_gap);
+	CHECK(written == count, "wrote %d of %d", written, count);
+	CHECK(abs(count - 188) <= 2, "unexpected count %d", count);
+	CHECK(max_dev < 3, "spline strays %.2f m from the circle", max_dev);
+	CHECK(min_gap > 9 && max_gap < 11, "uneven spacing %.2f..%.2f", min_gap, max_gap);
+	free(out);
+
+	ag_route_point_t line[3] = {
+		{v3(0, 0, 0), v3(0, 0, 0), 10}, {v3(0, 0, 50), v3(0, 0, 0), 10}, {v3(0, 0, 100), v3(0, 0, 0), 10}
+	};
+	ag_route_point_t lout[16];
+	int lcount = ag_route_resample(line, 3, false, 10, lout, 16);
+	printf("  open 100 m line -> %d points, ends at z = %.1f and %.1f\n", lcount, lout[0].position.z, lout[lcount - 1].position.z);
+	CHECK(lcount == 11, "open line count %d", lcount);
+	CHECK(fabsf(lout[lcount - 1].position.z - 100) < 0.5f, "open line end at %.2f", lout[lcount - 1].position.z);
+}
+
+static void test_open_race(void) {
+	printf("\n== AI race on the open circuit (no walls, route walls on) ==\n");
+	test_world_t tw;
+	test_world_make_circuit(&tw, false);
+	race_result_t r;
+	run_race(&tw, 1, true, true, &r);
+	int walls = 0, hard = 0, oob = 0;
+	for (int i = 0; i < RACE_SHIPS; i++) {
+		walls += r.wall_hits[i];
+		hard += r.hard_wall_hits[i];
+		oob += r.out_of_bounds[i];
+	}
+	printf("  %s finished, winner #%d in %.2fs, %d route wall hits (%d hard), %d out of bounds\n",
+		r.all_finished ? "all" : "NOT ALL", r.finish_order[0], r.finish_time[r.finish_order[0]], walls, hard, oob);
+	CHECK(r.all_finished && r.finite, "open circuit race failed");
+	CHECK(oob <= RACE_SHIPS, "%d out of bounds on the open circuit", oob);
+	test_world_free(&tw);
+}
+
+
 int main(int argc, char **argv) {
 	(void)argc;
 	(void)argv;
 	test_acceleration();
 	test_turning();
 	test_walls();
+	test_mesh();
+	test_route_walls();
+	test_resample();
 	test_race();
+	test_open_race();
 
 	printf("\n%s (%d failed checks)\n", failures ? "FAILED" : "PASSED", failures);
 	return failures ? 1 : 0;

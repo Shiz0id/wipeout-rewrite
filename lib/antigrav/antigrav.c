@@ -245,6 +245,134 @@ float ag_route_length(ag_world_t *w) {
 	return w->route_length;
 }
 
+typedef struct {
+	vec3_t position;
+	vec3_t up;
+	float width;
+} route_sample_t;
+
+static ag_route_point_t route_control(const ag_route_point_t *c, int len, bool closed, int i) {
+	if (closed) {
+		return c[((i % len) + len) % len];
+	}
+	if (i < 0) {
+		// Extrapolate past the ends so the spline reaches them
+		ag_route_point_t p = c[0];
+		p.position = vec3_sub(vec3_mulf(c[0].position, 2), c[1].position);
+		return p;
+	}
+	if (i >= len) {
+		ag_route_point_t p = c[len - 1];
+		p.position = vec3_sub(vec3_mulf(c[len - 1].position, 2), c[len - 2].position);
+		return p;
+	}
+	return c[i];
+}
+
+static vec3_t lerp_up(vec3_t a, vec3_t b, float t) {
+	bool a_zero = vec3_dot(a, a) < 1e-12f, b_zero = vec3_dot(b, b) < 1e-12f;
+	if (a_zero && b_zero) {
+		return vec3(0, 0, 0);
+	}
+	if (a_zero) {
+		return b;
+	}
+	if (b_zero) {
+		return a;
+	}
+	return vec3_normalize_or(vec3_lerp(vec3_normalize_or(a, b), vec3_normalize_or(b, a), t), a);
+}
+
+// Centripetal Catmull-Rom between control points seg and seg + 1
+static route_sample_t route_spline(const ag_route_point_t *c, int len, bool closed, int seg, float u) {
+	ag_route_point_t p[4];
+	for (int k = 0; k < 4; k++) {
+		p[k] = route_control(c, len, closed, seg - 1 + k);
+	}
+
+	float t[4] = {0};
+	for (int k = 1; k < 4; k++) {
+		float d = vec3_len(vec3_sub(p[k].position, p[k - 1].position));
+		t[k] = t[k - 1] + maxf(sqrtf(d), 1e-3f);
+	}
+	float tt = lerpf(t[1], t[2], u);
+	#define CR_MIX(P, Q, TA, TB) vec3_add(vec3_mulf(P, (TB - tt) / (TB - TA)), vec3_mulf(Q, (tt - TA) / (TB - TA)))
+	vec3_t a1 = CR_MIX(p[0].position, p[1].position, t[0], t[1]);
+	vec3_t a2 = CR_MIX(p[1].position, p[2].position, t[1], t[2]);
+	vec3_t a3 = CR_MIX(p[2].position, p[3].position, t[2], t[3]);
+	vec3_t b1 = CR_MIX(a1, a2, t[0], t[2]);
+	vec3_t b2 = CR_MIX(a2, a3, t[1], t[3]);
+	vec3_t pos = CR_MIX(b1, b2, t[1], t[2]);
+	#undef CR_MIX
+
+	return (route_sample_t){
+		.position = pos,
+		.up = lerp_up(p[1].up, p[2].up, u),
+		.width = lerpf(p[1].width, p[2].width, u),
+	};
+}
+
+int ag_route_resample(const ag_route_point_t *controls, int len, bool closed, float spacing, ag_route_point_t *out, int out_capacity) {
+	if (!controls || len < 2 || spacing <= 0) {
+		return 0;
+	}
+	const int sub = 32;
+	int segs = closed ? len : len - 1;
+
+	// Pass 1: length of the dense polyline
+	float total = 0;
+	route_sample_t prev = route_spline(controls, len, closed, 0, 0);
+	for (int seg = 0; seg < segs; seg++) {
+		for (int j = 1; j <= sub; j++) {
+			route_sample_t cur = route_spline(controls, len, closed, seg, (float)j / sub);
+			total += vec3_len(vec3_sub(cur.position, prev.position));
+			prev = cur;
+		}
+	}
+	if (total <= 0) {
+		return 0;
+	}
+
+	// Even spacing; a closed route must close up with the same spacing
+	int count = closed ? (int)(total / spacing + 0.5f) : (int)(total / spacing + 0.5f) + 1;
+	if (count < 2) {
+		count = 2;
+	}
+	float step = closed ? total / count : total / (count - 1);
+	if (!out) {
+		return count;
+	}
+
+	// Pass 2: emit points at multiples of step
+	int written = 0;
+	float dist = 0, next = 0;
+	prev = route_spline(controls, len, closed, 0, 0);
+	for (int seg = 0; seg < segs && written < count && written < out_capacity; seg++) {
+		for (int j = 1; j <= sub && written < count && written < out_capacity; j++) {
+			route_sample_t cur = route_spline(controls, len, closed, seg, (float)j / sub);
+			float d = vec3_len(vec3_sub(cur.position, prev.position));
+			while (d > 0 && next <= dist + d && written < count && written < out_capacity) {
+				float f = (next - dist) / d;
+				out[written++] = (ag_route_point_t){
+					.position = vec3_lerp(prev.position, cur.position, f),
+					.up = lerp_up(prev.up, cur.up, f),
+					.width = lerpf(prev.width, cur.width, f),
+				};
+				next = written * step;
+			}
+			dist += d;
+			prev = cur;
+		}
+	}
+
+	// Float drift may leave the very last point of an open route unwritten
+	if (!closed && written == count - 1 && written < out_capacity) {
+		ag_route_point_t last = controls[len - 1];
+		out[written++] = last;
+	}
+	return count;
+}
+
 void ag_route_sample(ag_world_t *w, float d, vec3_t *position, vec3_t *direction, vec3_t *up, float *width) {
 	if (!w->route) {
 		if (position) *position = vec3(0, 0, 0);
@@ -1048,6 +1176,21 @@ static void ship_update_race(ag_world_t *w, int id, ship_t *sh, float dt) {
 		vec3_t r_side = vec3_cross(r_up, r_dir);
 		vec3_t rel = vec3_sub(s->position, r_pos);
 		float lateral = vec3_dot(rel, r_side);
+
+		// Invisible walls along the route edges
+		float limit = r_width * 0.5f - p->half_extents.x;
+		if (w->desc.route_walls && limit > 0 && fabsf(lateral) > limit) {
+			float side = signf(lateral);
+			vec3_t wall_normal = vec3_mulf(r_side, -side);
+			s->position = vec3_add(s->position, vec3_mulf(wall_normal, fabsf(lateral) - limit));
+			ag_hit_t hit = {
+				.position = vec3_add(r_pos, vec3_mulf(r_side, side * r_width * 0.5f)),
+				.normal = wall_normal,
+				.surface_flags = AG_SURFACE_WALL,
+			};
+			ship_wall_response(w, id, sh, wall_normal, r_up, &hit);
+			lateral = side * limit;
+		}
 		s->lateral_offset = lateral * w->hand;
 
 		if (s->grounded && !s->out_of_bounds && fabsf(lateral) < r_width * 0.5f + p->half_extents.x) {
