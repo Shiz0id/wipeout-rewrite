@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.10)
+project(antigrav C)
+
+add_library(antigrav STATIC antigrav.c antigrav.h)
+target_include_directories(antigrav PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+set_target_properties(antigrav PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
+if(NOT MSVC)
+	target_link_libraries(antigrav PUBLIC m)
+endif()
+
+# Build the simulation tests by default only when this is the top level project
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+	set(ANTIGRAV_TESTS_DEFAULT ON)
+else()
+	set(ANTIGRAV_TESTS_DEFAULT OFF)
+endif()
+option(ANTIGRAV_BUILD_TESTS "Build the antigrav simulation tests" ${ANTIGRAV_TESTS_DEFAULT})
+
+if(ANTIGRAV_BUILD_TESTS)
+	enable_testing()
+	add_executable(antigrav_sim_test test/sim_test.c test/test_world.c)
+	target_link_libraries(antigrav_sim_test PRIVATE antigrav)
+	set_target_properties(antigrav_sim_test PROPERTIES C_STANDARD 99)
+	add_test(NAME antigrav_sim_test COMMAND antigrav_sim_test)
+endif()
